@@ -1,0 +1,12 @@
+{
+  "name": "agent-board",
+  "owner": { "name": "Krzysztof Trzos (Jazi)", "url": "https://github.com/jazithedev" },
+  "metadata": { "description": "Companion mod for Jazi's Agent Board" },
+  "plugins": [
+    {
+      "name": "agent-board-limits",
+      "source": "./mods/agent-board-limits",
+      "description": "Feeds your 5-hour and weekly rate-limit usage to Jazi's Agent Board."
+    }
+  ]
+}

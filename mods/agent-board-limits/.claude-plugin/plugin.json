@@ -1,0 +1,9 @@
+{
+  "name": "agent-board-limits",
+  "version": "0.1.0",
+  "description": "Writes your account's 5-hour and weekly rate-limit usage to ~/.cache/agent-board/limits.json after every turn, so Jazi's Agent Board can show it.",
+  "author": { "name": "Krzysztof Trzos (Jazi)", "url": "https://github.com/jazithedev" },
+  "homepage": "https://github.com/jazithedev/agent-board",
+  "repository": "https://github.com/jazithedev/agent-board",
+  "license": "MIT"
+}
