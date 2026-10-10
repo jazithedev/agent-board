@@ -36,7 +36,7 @@ from typing import Callable, Optional
 
 import pullrequests as prs
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -245,7 +245,11 @@ MODEL_PRESETS = [
     ("Haiku 5.5", "claude-haiku-5-5", "full model id"),
 ]
 REFRESHING = "refreshing pull requests…"
-CONFIRM_KEY = "x"  # ctrl+x asks, x confirms: the same hand, the same key, for stopping, deleting and removing a tag
+CONFIRM_KEY = "x"  # ctrl+x asks; x (or ctrl+x again) confirms: stopping, deleting and removing a tag all work this way
+
+
+def is_confirmation(key: str, ch: str) -> bool:
+    return key == "ctrl+x" or (key == "char" and ch.lower() == CONFIRM_KEY)
 PASTE_CHIP_MIN_CHARS = 800  # Claude Code collapses a longer paste into a chip: [Pasted text #1 +97 lines]
 PASTE_CHIP_RE = re.compile(r"\[Pasted text #(\d+)(?: \+(\d+) lines)?\]")
 PR_REFRESH_CHOICES = [0, 5, 10, 15, 30, 60]  # minutes between pull-request refreshes; 0 = only when asked
@@ -814,6 +818,7 @@ Seg = tuple[str, str]  # (text, style)
 class Line:
     segs: list[Seg]
     selected: bool = False
+    caret: Optional[int] = None  # column of the text cursor on this row, when it is being edited in place
 
 
 def seg_width(segs: list[Seg]) -> int:
@@ -864,11 +869,11 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("alt+1 … alt+6", "open the Nth visible session"),
         ("enter / → / click", "open the selected session (a draft in the prompt is kept)"),
         ("space", "peek at the session's recent output"),
-        ("ctrl+r", "rename the session (kept by the board only)"),
+        ("ctrl+r", "rename the session right in its row (kept by the board only)"),
         ("ctrl+g", "tags: pick, create, rename, delete (ctrl+r / ctrl+x inside)"),
         ("ctrl+t", "pin the session to the top"),
-        ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x confirms)"),
-        ("type, then enter", "start a new background session from the prompt"),
+        ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x or ctrl+x again confirms)"),
+        ("type, then enter", "start a new background session; it is selected, so → opens it"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
         ("ctrl+p", "choose the project a new session starts in"),
@@ -973,12 +978,20 @@ class Board:
         self.refresh_requested = threading.Event()
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
+        self.select_when_seen: Optional[tuple[str, float]] = None  # (id, when asked): a session just started from the prompt
 
     # ── data ──
     def set_sessions(self, sessions: list[Session]) -> None:
         self.sessions = sessions
         if self.sel and self.sel not in {s.id for s in sessions}:
             self.sel = None
+        if self.select_when_seen:
+            wanted, asked_at = self.select_when_seen
+            new = next((s for s in sessions if s.id == wanted), None)
+            if new or self.now() - asked_at > 60:
+                if new and self.sel is None and self.matches(new):  # only while you are still on the prompt
+                    self.sel = wanted
+                self.select_when_seen = None
         self._resolve_pending()
 
     def expect_session(self, prompt: str, cwd: str, tags: list[str]) -> None:
@@ -994,6 +1007,8 @@ class Board:
             )
             if match:
                 self.meta.update(match.id, tags=list(dict.fromkeys(self.meta.get(match.id).get("tags", []) + p["tags"])))
+                if self.sel is None and self.matches(match):
+                    self.sel = match.id
             elif self.now() - p["at"] < 120:
                 keep.append(p)
         self.pending = keep
@@ -1115,7 +1130,7 @@ class Board:
         tp = self.tagpicker
         if tp["delete"] is not None:
             label, tp["delete"] = tp["delete"], None
-            if key == "char" and ch.lower() == CONFIRM_KEY:
+            if is_confirmation(key, ch):
                 self.meta.delete_tag(label)
                 tp["idx"] = 0
                 self.msg = f"deleted tag “{label}”"
@@ -1579,7 +1594,7 @@ class Board:
 
     def _handle_confirm(self, key: str, ch: str) -> Optional[Effect]:
         c, self.confirm = self.confirm, None
-        if key == "char" and ch.lower() == CONFIRM_KEY:
+        if is_confirmation(key, ch):
             return Effect(c["kind"], session_id=c["sid"])
         self.msg = "cancelled"
         return None
@@ -1731,19 +1746,26 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
     prefix: list[Seg] = [("▌" if selected else " ", "accent"), (" ", "normal"), (icon, icon_style), ("  ", "normal")] + pin
     chips: list[list[Seg]] = [[(f" {t.label} ", tag_style(t))] for t in board.tags_of(s)]
     name = board.name_of(s)
+    renaming = board.edit if (board.edit and board.edit["kind"] == "rename" and board.edit["sid"] == s.id) else None
+    caret_x: Optional[int] = None
 
     def total(n: str, cs: list[list[Seg]]) -> int:
         return seg_width(prefix) + cell_width(n) + sum(1 + seg_width(c) for c in cs) + 2 + seg_width(right)
 
-    while chips and total(name, chips) > width:
-        chips.pop()
-    if total(name, chips) > width:
-        name = fit(name, max(8, width - seg_width(prefix) - 2 - seg_width(right)))
-    left: list[Seg] = prefix + [(name, "name_sel" if selected else "name")]
-    for c in chips:
-        left += [(" ", "normal")] + c
+    if renaming:  # the name is edited right here in the list, so your eyes stay on the row
+        shown = fit_tail(renaming["text"], max(8, width - seg_width(prefix) - 2 - seg_width(right) - 1))
+        left: list[Seg] = prefix + [(shown, "edit")]
+        caret_x = seg_width(prefix) + cell_width(shown)
+    else:
+        while chips and total(name, chips) > width:
+            chips.pop()
+        if total(name, chips) > width:
+            name = fit(name, max(8, width - seg_width(prefix) - 2 - seg_width(right)))
+        left = prefix + [(name, "name_sel" if selected else "name")]
+        for c in chips:
+            left += [(" ", "normal")] + c
     gap = max(1, width - seg_width(left) - seg_width(right))
-    first = Line(left + [(" " * gap, "normal")] + right, selected)
+    first = Line(left + [(" " * gap, "normal")] + right, selected, caret_x)
 
     branch = [(f"⎇ {s.branch}", "faint")] if s.branch else []
     indent = [("▌" if selected else " ", "accent"), ("    ", "normal")]
@@ -1925,6 +1947,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     body: list[Line] = []
     owners: list[Optional[str]] = []
     sel_range: Optional[tuple[int, int]] = None
+    rename_at: Optional[tuple[int, int]] = None  # (body row, column) of the in-place rename cursor
     groups = board.groups() if board.mode not in PR_VIEWS else []
     if board.mode in PR_VIEWS:
         body, owners, sel_range = pr_body(board, inner)
@@ -1937,6 +1960,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         for s in items:
             selected = s.id == board.sel
             rows = row_lines(board, s, inner, selected)
+            if rows[0].caret is not None:
+                rename_at = (len(body), rows[0].caret)
             if selected:
                 sel_range = (len(body), len(body) + len(rows))
             body.extend(rows)
@@ -1951,6 +1976,9 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
             board.scroll = sel_range[1] - body_h
     board.scroll = max(0, min(board.scroll, max(0, len(body) - body_h)))
     view = body[board.scroll : board.scroll + body_h]
+    inline_caret: Optional[tuple[int, int]] = None
+    if rename_at and 0 <= rename_at[0] - board.scroll < body_h:
+        inline_caret = (HEADER_ROWS + rename_at[0] - board.scroll, rename_at[1])
     board.hit = {HEADER_ROWS + i: owner for i, owner in enumerate(owners[board.scroll : board.scroll + body_h]) if owner}
     view += [Line([]) for _ in range(body_h - len(view))]
     spare = body_h - len(body) - 1
@@ -1988,8 +2016,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         pre = [(" ", "normal"), (f"✎ {name} ", "accent")]
         lines.append(Line(pre + [(fit(editing_setting["text"], max(5, width - seg_width(pre) - 1)), "bold")]))
         caret = (input_y, min(width - 1, seg_width(pre) + cell_width(editing_setting["text"])))
-    elif board.edit:
-        label = {"find": "⌕ find ", "rename": "✎ rename "}[board.edit["kind"]]
+    elif board.edit and board.edit["kind"] == "find":  # a rename is edited in the session's own row instead
+        label = "⌕ find "
         pre = [(" ", "normal"), (label, "accent")]
         text = board.edit["text"]
         lines.append(Line(pre + [(fit(text, width - seg_width(pre) - 1), "bold")]))
@@ -2020,6 +2048,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         if board.sel is None and not (board.help or board.peek or board.confirm or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
             caret = (input_y, seg_width(pre) + (seg_width(body_segs) if board.input else 0))
     lines.append(Line(_ellipsize(_hint_segs(board), inner)))
+    if inline_caret:
+        caret = inline_caret
     return [Line(_clip(l.segs, width), l.selected) for l in lines[:height]], caret
 
 
@@ -2101,7 +2131,7 @@ def _hint_segs(board: Board) -> list[Seg]:
     if board.confirm:
         s = next((x for x in board.sessions if x.id == board.confirm["sid"]), None)
         verb = "Stop" if board.confirm["kind"] == "stop" else "Delete"
-        return [(" ", "normal"), (f"{verb} “{board.name_of(s) if s else '?'}”?", "warn"), (f"  {CONFIRM_KEY} to confirm · any other key cancels", "faint")]
+        return [(" ", "normal"), (f"{verb} “{board.name_of(s) if s else '?'}”?", "warn"), (f"  {CONFIRM_KEY} or ctrl+x to confirm · any other key cancels", "faint")]
     if board.msg:
         return [(" ", "normal"), (board.msg, "fail" if board.msg.startswith("✗") else "accent")]
     if board.edit:
@@ -2120,7 +2150,7 @@ def _hint_segs(board: Board) -> list[Seg]:
     elif board.tagpicker:
         tp = board.tagpicker
         if tp["delete"] is not None:
-            return [(" ", "normal"), (f"Delete tag “{tp['delete']}” from the library and every session?", "warn"), (f"  {CONFIRM_KEY} to confirm · any other key cancels", "faint")]
+            return [(" ", "normal"), (f"Delete tag “{tp['delete']}” from the library and every session?", "warn"), (f"  {CONFIRM_KEY} or ctrl+x to confirm · any other key cancels", "faint")]
         hint = (
             "enter save · esc cancel" if tp["rename"] is not None
             else "↑/↓ move · enter toggle · type to filter or create · ctrl+r rename · ctrl+x delete · esc done"
@@ -2601,7 +2631,7 @@ def _theme() -> dict[str, tuple[int, int, int]]:
         "normal": (-1, -1, d), "bold": (-1, -1, b), "dim": (246, -1, d), "faint": (241, -1, d), "strip": (252, -1, d),
         "strip_bold": (255, -1, b),
         "rule": (238, -1, d), "accent": (209, -1, b), "head": (252, -1, b), "key": (215, -1, b),
-        "name": (255, -1, b), "name_sel": (231, -1, b),
+        "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b),
         "work": (215, -1, b), "wait": (221, -1, b), "done": (108, -1, d), "fail": (203, -1, b), "warn": (221, -1, b),
         "tag_review": (16, 183, d), "tag_ticket": (16, 117, d), "tag_pr": (16, 151, d), "tag_custom": (252, 238, d),
     }
@@ -2986,6 +3016,20 @@ def start_review_sessions(board: Board, items: list) -> None:
     board.set_sessions(load_sessions())
 
 
+def register_new_session(board: Board, effect: Effect, first_line: str, started: bool) -> bool:
+    """Tags a session just started from the prompt and arranges for it to be selected once it shows up,
+    so one → opens it. Returns True when it will be selected."""
+    found = re.search(r"\b([0-9a-f]{8})\b", first_line) if started else None
+    if found:
+        if effect.tags:
+            board.meta.update(found.group(1), tags=effect.tags)
+        board.select_when_seen = (found.group(1), board.now())
+        return True
+    if effect.tags:
+        board.expect_session(effect.prompt, effect.cwd, effect.tags)
+    return False
+
+
 def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
     """Runs an effect; returns False when the board should quit."""
     if effect.kind == "quit":
@@ -3051,12 +3095,8 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         elif effect.kind == "dispatch":
             r = run_cli(bg_command(effect.prompt, effect.model), cwd=effect.cwd or None)
             first = (r.stdout or r.stderr).strip().split("\n")[0] or "session started"
-            new_id = re.search(r"\b([0-9a-f]{8})\b", first) if r.returncode == 0 else None
-            if effect.tags and new_id:
-                board.meta.update(new_id.group(1), tags=effect.tags)
-            elif effect.tags:
-                board.expect_session(effect.prompt, effect.cwd, effect.tags)
-            board.msg = first + (f" · tagged {', '.join(effect.tags)}" if effect.tags else "") + (f" · on {model_label(effect.model)}" if effect.model else "")
+            selecting = register_new_session(board, effect, first, r.returncode == 0)
+            board.msg = first + (f" · tagged {', '.join(effect.tags)}" if effect.tags else "") + (f" · on {model_label(effect.model)}" if effect.model else "") + (" · → opens it" if selecting else "")
             board.set_sessions(load_sessions())
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"{effect.kind} failed: {exc}"

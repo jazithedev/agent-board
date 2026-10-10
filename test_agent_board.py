@@ -232,6 +232,208 @@ class Interaction(unittest.TestCase):
         self.assertIsNone(self.b.sel)
 
 
+class RenameInTheList(unittest.TestCase):
+    """Renaming happens in the session's own row, so your eyes stay where the session is."""
+
+    def setUp(self):
+        self.b = board([make(1, "working", "alpha", auto_tags=ab.derive_tags("review AM-5")), make(2, "done", "beta")])
+        self.b.handle("down")
+        self.b.handle("down")  # the second row
+        self.b.handle("ctrl+r")
+
+    def screen(self, width=110, height=24):
+        lines, caret = ab.compose(self.b, width, height)
+        return lines, caret
+
+    def row_of(self, lines, needle):
+        return next(i for i, l in enumerate(lines) if needle in ab.plain(l))
+
+    def test_the_row_turns_into_the_edit_field_prefilled_with_the_current_name(self):
+        lines, _ = self.screen()
+        row = lines[self.row_of(lines, "beta")]
+        self.assertIn("edit", {style for _, style in row.segs})
+        self.assertIn("beta", ab.plain(row))
+
+    def test_the_bottom_prompt_is_untouched_and_no_rename_prompt_appears_there(self):
+        lines, _ = self.screen()
+        text = "\n".join(ab.plain(l) for l in lines)
+        self.assertNotIn("✎ rename", text)
+        prompt = next(ab.plain(l) for l in lines if "❯" in ab.plain(l))
+        self.assertIn("describe a task", prompt)
+        self.assertIn("enter save · esc cancel", text)
+
+    def test_the_cursor_sits_at_the_end_of_the_name_on_that_very_row(self):
+        lines, caret = self.screen()
+        y = self.row_of(lines, "beta")
+        self.assertEqual(caret[0], y)
+        row = ab.plain(lines[y])
+        self.assertEqual(caret[1], row.index("beta") + len("beta"))
+
+    def test_typing_shows_up_in_the_row_as_you_type_and_the_cursor_follows(self):
+        for _ in "beta":
+            self.b.handle("backspace")
+        for c in "Gamma":
+            self.b.handle("char", c)
+        lines, caret = self.screen()
+        y = self.row_of(lines, "Gamma")
+        self.assertEqual(caret, (y, ab.plain(lines[y]).index("Gamma") + 5))
+
+    def test_enter_saves_and_the_row_returns_to_normal_with_its_tags(self):
+        self.b.handle("ctrl+u")
+        for c in "Renamed":
+            self.b.handle("char", c)
+        self.b.handle("enter")
+        lines, _ = self.screen()
+        row = lines[self.row_of(lines, "Renamed")]
+        self.assertNotIn("edit", {style for _, style in row.segs})
+        self.assertEqual(self.b.name_of(self.b.selected()), "Renamed")
+
+    def test_escape_cancels_and_restores_the_original_name(self):
+        for c in "zz":
+            self.b.handle("char", c)
+        self.b.handle("esc")
+        lines, caret = self.screen()
+        self.assertTrue(any("beta" in ab.plain(l) for l in lines))
+        self.assertFalse(any("betazz" in ab.plain(l) for l in lines))
+        self.assertIsNone(self.b.edit)
+
+    def test_tags_make_room_while_editing_a_session_that_has_them(self):
+        b = board([make(1, "working", "alpha", auto_tags=ab.derive_tags("review AM-5"))])
+        b.handle("down")
+        b.handle("ctrl+r")
+        lines, _ = ab.compose(b, 80, 20)
+        row = next(ab.plain(l) for l in lines if "alpha" in ab.plain(l))
+        self.assertNotIn("Ticket", row)  # the chips return when you finish
+        b.handle("esc")
+        row = next(ab.plain(l) for l in ab.compose(b, 80, 20)[0] if "alpha" in ab.plain(l))
+        self.assertIn("Ticket: AM-5", row)
+
+    def test_only_the_edited_row_changes_and_find_still_edits_at_the_bottom(self):
+        lines, _ = self.screen()
+        others = [l for l in lines if "alpha" in ab.plain(l)]
+        self.assertTrue(others)
+        self.assertNotIn("edit", {style for l in others for _, style in l.segs})
+        self.b.handle("esc")
+        self.b.handle("ctrl+f")
+        self.assertTrue(any("⌕ find" in ab.plain(l) for l in self.screen()[0]))
+
+    def test_it_works_in_the_by_project_view_too(self):
+        self.b.handle("esc")
+        self.b.handle("ctrl+s")
+        self.b.handle("ctrl+r")
+        lines, caret = self.screen()
+        self.assertEqual(caret[0], self.row_of(lines, "beta"))
+
+    def test_a_long_name_keeps_its_end_visible_and_every_width_fits(self):
+        for _ in "beta":
+            self.b.handle("backspace")
+        for c in "a very long new name " * 6:
+            self.b.handle("space" if c == " " else "char", c)
+        for width in (50, 70, 100, 140):
+            lines, caret = self.screen(width)
+            for line in lines:
+                self.assertLessEqual(ab.seg_width(line.segs), width)
+            self.assertIsNotNone(caret)
+            self.assertLess(caret[1], width)
+        self.assertIn("new name", ab.plain(lines[self.row_of(lines, "new name")]))
+
+    def test_the_edited_row_is_scrolled_into_view_in_a_long_list_with_the_cursor_on_screen(self):
+        b = board([make(i, "done", f"old {i}", updated=i) for i in range(40)])
+        b.sel = "id39"
+        b.handle("ctrl+r")
+        lines, caret = ab.compose(b, 100, 16)
+        self.assertLess(caret[0], 16)
+        self.assertIn("old 39", ab.plain(lines[caret[0]]))
+
+
+class NewSessionSelected(unittest.TestCase):
+    """A session started from the prompt is selected when it appears, so one → opens it."""
+
+    def setUp(self):
+        self.b = board([make(1, "working", "alpha")])
+        self.dispatch = ab.Effect("dispatch", prompt="do it", cwd="/srv/www/scum-map", tags=["Bug"])
+
+    def appears(self, sid="deadbeef", **kw):
+        s = make(9, "working", "new one", **kw)
+        s.id = sid
+        return s
+
+    def test_the_id_in_claude_s_output_is_registered_and_the_tags_saved(self):
+        self.assertTrue(ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef (idle)", True))
+        self.assertEqual(self.b.select_when_seen[0], "deadbeef")
+        self.assertEqual(self.b.meta.get("deadbeef")["tags"], ["Bug"])
+
+    def test_a_failed_start_or_output_without_an_id_selects_nothing(self):
+        self.assertFalse(ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", False))
+        self.assertFalse(ab.register_new_session(self.b, self.dispatch, "something went sideways", True))
+        self.assertIsNone(self.b.select_when_seen)
+        self.assertEqual(len(self.b.pending), 2)  # one per attempt: the tags still find the session later by its prompt
+
+    def test_it_is_selected_the_moment_it_shows_up(self):
+        ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", True)
+        self.b.set_sessions([make(1, "working", "alpha"), self.appears()])
+        self.assertEqual(self.b.sel, "deadbeef")
+        self.assertIsNone(self.b.select_when_seen)
+
+    def test_one_right_arrow_or_enter_then_opens_it(self):
+        ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", True)
+        self.b.set_sessions([make(1, "working", "alpha"), self.appears()])
+        self.assertEqual(self.b.handle("right"), ab.Effect("attach", session_id="deadbeef"))
+        self.assertEqual(self.b.handle("enter"), ab.Effect("attach", session_id="deadbeef"))
+
+    def test_a_session_that_is_slow_to_appear_is_still_selected_when_it_does(self):
+        ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", True)
+        self.b.set_sessions([make(1, "working", "alpha")])
+        self.assertIsNone(self.b.sel)
+        self.assertIsNotNone(self.b.select_when_seen)  # still waiting
+        self.b.set_sessions([make(1, "working", "alpha"), self.appears()])
+        self.assertEqual(self.b.sel, "deadbeef")
+
+    def test_it_never_steals_the_selection_from_a_session_you_already_moved_to(self):
+        ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", True)
+        self.b.sel = "id1"
+        self.b.set_sessions([make(1, "working", "alpha"), self.appears()])
+        self.assertEqual(self.b.sel, "id1")
+        self.assertIsNone(self.b.select_when_seen)
+
+    def test_a_search_that_hides_it_means_it_is_not_selected(self):
+        ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", True)
+        self.b.query = "alpha"
+        self.b.set_sessions([make(1, "working", "alpha"), self.appears()])
+        self.assertIsNone(self.b.sel)
+
+    def test_it_gives_up_after_a_minute(self):
+        clock = [NOW]
+        self.b.now = lambda: clock[0]
+        ab.register_new_session(self.b, self.dispatch, "backgrounded · deadbeef", True)
+        clock[0] += 61
+        self.b.set_sessions([make(1, "working", "alpha")])
+        self.assertIsNone(self.b.select_when_seen)
+        self.b.set_sessions([make(1, "working", "alpha"), self.appears()])
+        self.assertIsNone(self.b.sel)
+
+    def test_without_an_id_the_prompt_match_selects_it_too(self):
+        ab.register_new_session(self.b, ab.Effect("dispatch", prompt="fix the crash", cwd="/srv/www/scum-map", tags=["Bug"]), "ok", True)
+        fresh = self.appears(intent="fix the crash please")
+        fresh.started_at = NOW + 1
+        self.b.set_sessions([make(1, "working", "alpha"), fresh])
+        self.assertEqual(self.b.sel, "deadbeef")
+
+    def test_it_is_scrolled_into_view_in_a_long_list(self):
+        b = board([make(i, "done", f"old {i}", updated=100 + i) for i in range(40)])
+        ab.register_new_session(b, self.dispatch, "backgrounded · deadbeef", True)
+        new = self.appears()
+        b.set_sessions(b.sessions + [new])
+        lines = [ab.plain(l) for l in ab.compose(b, 100, 20)[0]]
+        self.assertTrue(any("new one" in l for l in lines))
+
+    def test_the_prompt_is_cleared_when_the_session_is_started(self):
+        for c in "do it":
+            self.b.handle("space" if c == " " else "char", c)
+        self.b.handle("enter")
+        self.assertEqual(self.b.input, "")
+
+
 class ConfirmWithX(unittest.TestCase):
     """ctrl+x asks, x confirms; anything else (y included) cancels."""
 
@@ -267,15 +469,23 @@ class ConfirmWithX(unittest.TestCase):
             self.assertIsNone(self.b.handle(key, ch), key)
             self.assertIsNone(self.b.confirm, key)
 
-    def test_pressing_ctrl_x_twice_does_not_confirm(self):
+    def test_pressing_ctrl_x_again_confirms_too(self):
         self.ask("id2")
-        self.assertIsNone(self.b.handle("ctrl+x"))
+        self.assertEqual(self.b.handle("ctrl+x"), ab.Effect("remove", session_id="id2"))
         self.assertIsNone(self.b.confirm)
+        self.ask("id1")
+        self.assertEqual(self.b.handle("ctrl+x"), ab.Effect("stop", session_id="id1"))
+
+    def test_three_presses_do_not_run_it_twice(self):
+        self.ask("id2")
+        self.assertEqual(self.b.handle("ctrl+x").kind, "remove")
+        self.assertIsNone(self.b.handle("ctrl+x"))  # the confirmation is used up; this just asks again
+        self.assertIsNotNone(self.b.confirm)
 
     def test_the_footer_names_the_key(self):
         self.ask("id2")
         hint = ab.plain(ab.Line(ab._hint_segs(self.b)))
-        self.assertIn("x to confirm", hint)
+        self.assertIn("x or ctrl+x to confirm", hint)
         self.assertNotIn("y to confirm", hint)
 
     def test_deleting_a_tag_uses_the_same_key_and_the_same_wording(self):
@@ -283,11 +493,15 @@ class ConfirmWithX(unittest.TestCase):
         self.b.sel = "id1"
         self.b.handle("ctrl+g")
         self.b.handle("ctrl+x")
-        self.assertIn("x to confirm", ab.plain(ab.Line(ab._hint_segs(self.b))))
+        self.assertIn("x or ctrl+x to confirm", ab.plain(ab.Line(ab._hint_segs(self.b))))
         self.b.handle("char", "y")
         self.assertIn("Bug", self.b.meta.library)  # y cancelled it
         self.b.handle("ctrl+x")
         self.b.handle("char", "x")
+        self.assertNotIn("Bug", self.b.meta.library)
+        self.b.meta.library = ["Bug"]
+        self.b.handle("ctrl+x")
+        self.b.handle("ctrl+x")  # ctrl+x again confirms here too
         self.assertNotIn("Bug", self.b.meta.library)
 
     def test_the_shared_constant_is_what_both_confirmations_use(self):
