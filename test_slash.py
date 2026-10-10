@@ -314,13 +314,33 @@ class InThePrompt(unittest.TestCase):
         effect = b2.handle("enter")
         self.assertEqual(effect.prompt, "/srv/www/x")
 
-    def test_only_a_leading_slash_counts(self):
+    def test_a_slash_after_other_text_opens_the_list(self):
         b = board()
-        type_(b, "fix /help")
+        type_(b, "Create a mod /")
+        self.assertEqual(b.slash_query(), "")
+        type_(b, "he")
+        self.assertEqual(b.slash_query(), "he")
+        self.assertIn("help", [e.name for e in b.slash_view()[0]])
+
+    def test_a_slash_inside_a_word_or_after_a_space_never_opens_it(self):
+        b = board()
+        type_(b, "a/")
         self.assertIsNone(b.slash_query())
         b2 = board()
-        type_(b2, "a/")
+        type_(b2, "fix /help ")
         self.assertIsNone(b2.slash_query())
+
+    def test_tab_replaces_only_the_slash_word(self):
+        b = board()
+        type_(b, "Create a mod /hel")
+        b.handle("tab")
+        self.assertEqual(b.input, "Create a mod /help ")
+
+    def test_enter_on_a_fully_typed_mid_prompt_command_still_sends(self):
+        b = board()
+        type_(b, "fix /help")
+        effect = b.handle("enter")
+        self.assertEqual(effect.prompt, "fix /help")
 
     def test_it_stays_closed_when_the_focus_is_not_on_the_prompt(self):
         b = board()

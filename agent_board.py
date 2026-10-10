@@ -1262,9 +1262,16 @@ class Board:
         blocked = self.sel is not None or self.mode in PR_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
         if blocked or self.settingsui or self.confirm or self.help or self.peek:
             return None
-        if not self.input.startswith("/") or any(c.isspace() for c in self.input):
+        token = self.slash_token()
+        return None if token is None else token[1:]
+
+    def slash_token(self) -> Optional[str]:
+        """The word being typed, when it starts with a slash: `/cod` in "Create a mod /cod". None once a space follows it."""
+        text = self.input
+        if not text or text[-1].isspace():
             return None
-        return self.input[1:]
+        word = text.split()[-1]
+        return word if word.startswith("/") else None
 
     def slash_view(self) -> tuple[list, int]:
         """The commands matching what is typed, and the highlighted one (reset when the text changes)."""
@@ -1280,15 +1287,17 @@ class Board:
         matches, idx = self.slash_view()
         if not matches or key not in ("up", "down", "tab", "enter"):
             return False, None
+        token = self.slash_token() or ""
+        before = self.input[: len(self.input) - len(token)]
         if key == "up":
             self.slash_state["idx"] = max(0, idx - 1)
         elif key == "down":
             self.slash_state["idx"] = min(len(matches) - 1, idx + 1)
         else:
             chosen = matches[idx]
-            if key == "enter" and self.input.lower() == f"/{chosen.name.lower()}":
+            if key == "enter" and token.lower() == f"/{chosen.name.lower()}":
                 return False, None  # it is already typed out in full: enter starts the session
-            self.input = f"/{chosen.name} "
+            self.input = f"{before}/{chosen.name} "
         return True, None
 
     # ── pull requests ──
