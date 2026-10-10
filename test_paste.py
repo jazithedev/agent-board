@@ -166,7 +166,7 @@ class PasteRouting(unittest.TestCase):
         b = board()
         b.handle("down")
         b.handle("ctrl+x")
-        b.handle("paste", "y")
+        b.handle("paste", "x")
         self.assertEqual(b.input, "")
         self.assertIsNotNone(b.confirm)
 
