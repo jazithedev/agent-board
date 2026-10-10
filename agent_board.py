@@ -639,16 +639,16 @@ def limit_style(percent: float) -> str:
     return "done" if percent < 60 else "wait" if percent < 85 else "fail"
 
 
-def limits_panel(limits: Optional[Limits], width: int, now: float) -> list[Line]:
+def limits_panel(limits: Optional[Limits], width: int, now: float, disk: Optional[DiskInfo] = None) -> list[Line]:
     title: list[Seg] = [("  ", "normal"), ("LIMITS", "head")]
+    disk_lines = disk_rows(disk, width) if disk and disk.disks else []
     if limits is None:
-        title.append(("  account-wide ", "faint"))
-        title.append(("─" * max(0, width - seg_width(title)), "rule"))
+        title.append(("─" * max(0, width - seg_width(title) - 1), "rule"))
         note = "no reading yet: it appears after your next turn in a session that loads the agent-board-limits mod (see README)"
-        return [Line(title), Line([("  ", "normal"), (fit(note, max(10, width - 4)), "faint")])]
+        return [Line(title), Line([("  ", "normal"), (fit(note, max(10, width - 4)), "faint")])] + disk_lines
     age = now - limits.updated_at
     stale = age > STALE_AFTER_SECONDS
-    title.append((f"  account-wide · as of {fmt_until(age)} ago ", "wait" if stale else "faint"))
+    title.append((f"  as of {fmt_until(age)} ago ", "wait" if stale else "faint"))
     title.append(("─" * max(0, width - seg_width(title)), "rule"))
     rows = [Line(title)]
     bar_width = 20 if width >= 70 else 10
@@ -665,6 +665,116 @@ def limits_panel(limits: Optional[Limits], width: int, now: float) -> list[Line]
         elif w.resets_at:
             segs.append((f"resets in {fmt_until(w.resets_at - now)}", "dim"))
             segs.append((f"  ({datetime.fromtimestamp(w.resets_at).strftime('%a %H:%M')})", "faint"))
+        rows.append(Line(segs))
+    return rows + disk_lines
+
+
+# ───────────────────────────── disk (a row in the LIMITS block) ─────────────────────────────
+
+DISK_REFRESH_SECONDS = 30
+DISK_SIZES_REFRESH_SECONDS = 300  # measuring Claude Code's data and the worktrees walks many files
+
+
+@dataclass(frozen=True)
+class DiskUsage:
+    label: str
+    total: int
+    used: int
+    free: int
+
+    @property
+    def percent(self) -> float:
+        in_use = self.used + self.free
+        return self.used / in_use * 100 if in_use else 0.0
+
+
+@dataclass(frozen=True)
+class DiskInfo:
+    disks: list[DiskUsage]
+    claude_bytes: Optional[int] = None  # ~/.claude: jobs, transcripts, plugins; None until measured
+    worktree_bytes: Optional[int] = None  # the git worktrees sessions work in
+
+
+def fmt_bytes(n: int) -> str:
+    for unit, size in (("T", 1 << 40), ("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
+        if n >= size:
+            v = n / size
+            return f"{v:.1f}{unit}" if v < 10 else f"{v:.0f}{unit}"
+    return f"{n}B"
+
+
+def disk_style(percent: float) -> str:
+    """Green until 15% is free, yellow below that, red below 5%."""
+    return "done" if percent < 85 else "wait" if percent < 95 else "fail"
+
+
+def mount_point(path: str) -> str:
+    p = os.path.realpath(path)
+    while not os.path.ismount(p) and p != os.path.dirname(p):
+        p = os.path.dirname(p)
+    return p
+
+
+def read_disks(paths: list[str], usage: Callable = shutil.disk_usage, mount_of: Callable[[str], str] = mount_point) -> list[DiskUsage]:
+    """One entry per distinct filesystem the paths live on, the first path's (your home) first."""
+    mounts: dict[str, None] = {}
+    for p in paths:
+        try:
+            mounts.setdefault(mount_of(p))
+        except OSError:
+            continue
+    out = []
+    for mount in mounts:
+        try:
+            u = usage(mount)
+        except OSError:
+            continue
+        out.append(DiskUsage("Disk" if len(mounts) == 1 else f"Disk {mount}", u.total, u.used, u.free))
+    return out
+
+
+def dir_size(path: str) -> int:
+    """Disk space a folder takes, counted like `du`: allocated blocks, hard links once, symlinks not followed."""
+    total, seen, stack = 0, set(), [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    total += st.st_blocks * 512
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif st.st_nlink > 1:
+                        if (st.st_dev, st.st_ino) in seen:
+                            total -= st.st_blocks * 512
+                        seen.add((st.st_dev, st.st_ino))
+        except OSError:
+            continue
+    return total
+
+
+def disk_rows(disk: DiskInfo, width: int) -> list[Line]:
+    bar_width = 20 if width >= 70 else 10 if width >= 46 else 5
+    rows = []
+    for i, d in enumerate(disk.disks):
+        pct = d.percent
+        head: list[Seg] = [
+            ("  ", "normal"), (f"{fit(d.label, 9):<9}", "dim"), (bar(pct / 100, bar_width), disk_style(pct)), (f" {pct:>3.0f}%  ", "bold"),
+        ]
+        room = width - seg_width(head) - 1
+        free = f"{fmt_bytes(d.free)} free of {fmt_bytes(d.total)}"
+        segs = head + ([(fit(free, room), "dim")] if room >= 6 else [])
+        if pct >= 95 and width - seg_width(segs) > 16:
+            segs.append(("  ⚠ nearly full", "fail"))
+        if i == 0 and disk.claude_bytes is not None:
+            extra = f"  ·  Claude data {fmt_bytes(disk.claude_bytes)}" + (f"  ·  worktrees {fmt_bytes(disk.worktree_bytes)}" if disk.worktree_bytes is not None else "")
+            left = width - seg_width(segs) - 1
+            if left > 8:
+                segs.append((fit(extra, left), "faint"))
         rows.append(Line(segs))
     return rows
 
@@ -853,6 +963,7 @@ class Board:
         self.tick = 0
         self.usage: Optional[UsageSummary] = None
         self.limits: Optional[Limits] = None
+        self.disk: Optional[DiskInfo] = None
         self.prs: Optional[prs.PrData] = None
         self.pr_busy = False
         self.pr_sel: Optional[str] = None
@@ -1844,7 +1955,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     spare = body_h - len(body) - 1
     if spare >= 2 and not (board.help or board.peek or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
         bottom = body_h
-        limits_block = limits_panel(board.limits, inner, board.now())
+        limits_block = limits_panel(board.limits, inner, board.now(), board.disk)
         if len(limits_block) <= spare:
             view[bottom - len(limits_block) :] = limits_block
             bottom -= len(limits_block) + 1
@@ -2677,6 +2788,44 @@ class UsageLoader(threading.Thread):
             self.stop.wait(20)
 
 
+class DiskLoader(threading.Thread):
+    """Free space every half minute; the size of Claude Code's data and of the worktrees every five minutes."""
+
+    def __init__(self, board: Board, usage: Callable = shutil.disk_usage, sizer: Callable[[str], int] = dir_size):
+        super().__init__(daemon=True)
+        self.board, self.usage, self.sizer = board, usage, sizer
+        self.stop = threading.Event()
+        self.claude_bytes: Optional[int] = None
+        self.worktree_bytes: Optional[int] = None
+        self.sizes_at = 0.0
+
+    def paths(self) -> list[str]:
+        found = [str(Path.home()), self.board.launch_cwd]
+        found += [s.project_path for s in list(self.board.sessions) if s.project_path]
+        return list(dict.fromkeys(found))
+
+    def worktree_dirs(self) -> list[str]:
+        roots = {os.path.realpath(os.path.join(p, ".claude", "worktrees")) for p in self.paths()}
+        return sorted(r for r in roots if os.path.isdir(r))
+
+    def measure_once(self, with_sizes: bool = True) -> DiskInfo:
+        if with_sizes and time.time() - self.sizes_at >= DISK_SIZES_REFRESH_SECONDS:
+            self.board.disk = DiskInfo(read_disks(self.paths(), self.usage), self.claude_bytes, self.worktree_bytes)  # show free space first
+            self.claude_bytes = self.sizer(str(Path.home() / ".claude"))
+            self.worktree_bytes = sum(self.sizer(d) for d in self.worktree_dirs())
+            self.sizes_at = time.time()
+        self.board.disk = DiskInfo(read_disks(self.paths(), self.usage), self.claude_bytes, self.worktree_bytes)
+        return self.board.disk
+
+    def run(self) -> None:
+        while not self.stop.is_set():
+            try:
+                self.measure_once()
+            except Exception:  # decoration: never take the board down
+                pass
+            self.stop.wait(DISK_REFRESH_SECONDS)
+
+
 class LimitsLoader(threading.Thread):
     def __init__(self, board: Board):
         super().__init__(daemon=True)
@@ -2900,11 +3049,13 @@ def main_loop(scr, demo: bool) -> None:
     if demo:
         board.usage = demo_usage()
         board.limits = demo_limits(board.now())
+        board.disk = demo_disk()
         board.prs = demo_prs(board.now())
     else:
         UsageLoader(board, UsageScanner()).start()
         LimitsLoader(board).start()
         PrLoader(board).start()
+        DiskLoader(board).start()
     try:
         while True:
             h, w = scr.getmaxyx()
@@ -3010,6 +3161,10 @@ def demo_prs(now: float) -> prs.PrData:
     return prs.PrData(mine=mine, review=review, errors=[], fetched_at=now - 4 * 60, repos=repos)
 
 
+def demo_disk() -> DiskInfo:
+    return DiskInfo([DiskUsage("Disk", 95 << 30, 61 << 30, 30 << 30)], int(1.3 * (1 << 30)), 3 << 30)
+
+
 def demo_limits(now: float) -> Limits:
     return Limits(
         [LimitWindow("five_hour", 38.5, now + 2 * 3600 + 14 * 60), LimitWindow("seven_day", 71, now + 3 * 86400 + 5 * 3600)],
@@ -3037,6 +3192,7 @@ def dump(width: int, height: int, demo: bool, view: str = "status") -> None:
     board.meta._save = lambda: None
     board.set_sessions(demo_sessions(board.now()) if demo else load_sessions())
     board.limits = demo_limits(board.now()) if demo else read_limits()
+    board.disk = demo_disk() if demo else DiskLoader(board).measure_once()
     if demo:
         board.usage = demo_usage()
     else:

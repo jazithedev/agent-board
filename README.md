@@ -46,9 +46,10 @@ Pure Python standard library: nothing to `pip install`, no accounts, no network 
   14 days  ▂▅▂▁▁▅▇▄▂▁▃█▆▆
   cache reads 900M tokens, 30 days
 
-  LIMITS  account-wide · as of 3m ago ───────────────────────────────────────────────────────────────
-  5-hour   ████████░░░░░░░░░░░░  38%  resets in 2h 13m  (Sat 00:59)
-  Weekly   ██████████████░░░░░░  71%  resets in 3d 4h  (Tue 03:45)
+  LIMITS  as of 3m ago ──────────────────────────────────────────────────────────────────────────────
+  5-hour   ████████░░░░░░░░░░░░  38%  resets in 2h 13m  (Sat 23:11)
+  Weekly   ██████████████░░░░░░  71%  resets in 3d 4h  (Wed 01:57)
+  Disk     █████████████░░░░░░░  67%  30G free of 95G  ·  Claude data 1.3G  ·  worktrees 3.0G
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
  ❯ describe a task for a new session                 in agent-board  ·  default model  ctrl+p ctrl+e
  enter open · space peek · ctrl+r rename · ctrl+g tags · ctrl+t pin · ctrl+x stop · ? shortcuts
@@ -153,9 +154,10 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
   14 days  ▂▅▂▁▁▅▇▄▂▁▃█▆▆
   cache reads 900M tokens, 30 days
 
-  LIMITS  account-wide · as of 3m ago ───────────────────────────────────────────────────────────────
-  5-hour   ████████░░░░░░░░░░░░  38%  resets in 2h 13m  (Sat 00:58)
-  Weekly   ██████████████░░░░░░  71%  resets in 3d 4h  (Tue 03:44)
+  LIMITS  as of 3m ago ──────────────────────────────────────────────────────────────────────────────
+  5-hour   ████████░░░░░░░░░░░░  38%  resets in 2h 13m  (Sat 23:11)
+  Weekly   ██████████████░░░░░░  71%  resets in 3d 4h  (Wed 01:57)
+  Disk     █████████████░░░░░░░  67%  30G free of 95G  ·  Claude data 1.3G  ·  worktrees 3.0G
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
    space marks a PR for review, r starts a review session
  space mark · ctrl+a all · r review · enter open · o browser · ctrl+l refresh · ctrl+o settings · ct…
@@ -166,7 +168,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - A one-line strip under the title keeps the counts visible in every view. Refresh is every 15 minutes by default; change it (or set it to manual) in settings (`ctrl+o`), or press `ctrl+l`.
 - GitHub uses `gh`; GitLab uses `glab`. Everything is **read-only**.
 
-**Usage and limits** (optional). The bottom of the screen can show your recent usage (turns, tokens, models, projects, from your local transcripts) and your **5-hour and weekly rate limits** with a countdown to each reset.
+**Usage, limits and disk** (optional). The bottom of the screen can show your recent usage (turns, tokens, models, projects, from your local transcripts), your **5-hour and weekly rate limits** (account-wide) with a countdown to each reset, and a **Disk** row: how full the disk is, how much is free, and how much Claude Code's own data and your sessions' git worktrees take. The bar turns yellow below 15% free and red below 5%. If your projects live on another disk, each disk gets its own row.
 
 ## Pull requests: setup
 
