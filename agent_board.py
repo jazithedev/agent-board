@@ -593,7 +593,7 @@ def usage_panel(u: UsageSummary, width: int, height: int) -> list[Line]:
     body: list[Line] = []
     for i in range(rows):
         segs: list[Seg] = [("  ", "normal")]
-        for column, w in zip(columns, widths):
+        for column, w in zip(columns, widths, strict=False):
             segs += _pad(column[i] if i < len(column) else [], w)
         body.append(Line(segs))
     return ([Line(title)] + body)[:height]
@@ -1367,7 +1367,10 @@ class Board:
         elif name.startswith("teams:"):
             org = name.split(":", 1)[1]
             inc, _, exc = text.partition("|")
-            split = lambda t: [x.strip() for x in t.split(",") if x.strip()]
+
+            def split(t: str) -> list[str]:
+                return [x.strip() for x in t.split(",") if x.strip()]
+
             teams = dict(self.meta.settings.get("review_teams") or {})
             if split(inc):
                 teams[org] = {"include": split(inc), "exclude": split(exc)}
@@ -3470,7 +3473,7 @@ def cli() -> None:
     try:
         raise SystemExit(main(sys.argv[1:]))
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
