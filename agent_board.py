@@ -490,6 +490,23 @@ def _transcript_cwd(folder: Path) -> Optional[tuple[float, str]]:
     return None
 
 
+MENTION_RE = re.compile(r"(?<!\S)@(\S+)")
+
+
+def mention_name(name: str) -> str:
+    """A project's name as it is written after an @: no spaces."""
+    return "-".join(name.split())
+
+
+def match_projects(projects: list[tuple[str, str]], query: str) -> list[tuple[str, str]]:
+    """Projects whose name starts with the query first, then those containing it, then those whose path does."""
+    q = query.lower()
+    starts = [p for p in projects if mention_name(p[0]).lower().startswith(q)]
+    inside = [p for p in projects if p not in starts and q in p[0].lower()]
+    by_path = [p for p in projects if p not in starts and p not in inside and q in p[1].lower()]
+    return starts + inside + by_path
+
+
 def known_projects(root: Path = PROJECTS_DIR) -> list[tuple[str, str]]:
     """(name, path) of every directory Claude Code has been used in on this machine, most recently used first.
 
@@ -932,6 +949,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("ctrl+t", "pin the session to the top"),
         ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x or ctrl+x again confirms)"),
         ("type, then enter", "start a new background session; it is selected, so → opens it"),
+        ("@", "type @ for your projects: tab or enter completes @name, and the session starts in that project"),
         ("/", "slash commands: type / for the list, ↑/↓ choose, tab or enter completes it"),
         ("← / → / click", "move the caret in the prompt; ctrl+← / ctrl+→ by word, home / end to the ends"),
         ("delete / ctrl+w", "delete the character after the caret / the word before it (alt+backspace too)"),
@@ -1047,6 +1065,8 @@ class Board:
         self.select_when_seen: Optional[tuple[str, float]] = None  # (id, when asked): a session just started from the prompt
         self.known_projects_fn: Optional[Callable[[], list[tuple[str, str]]]] = None  # set by the app: directories Claude Code has been used in
         self.known: list[tuple[str, str]] = []
+        self.known_at = -1e12
+        self.mention_state: dict = {"query": None, "idx": 0}
         self.placeholders: list[Session] = []  # rows for sessions still being started, until the real ones show up
         self.placeholder_seq = 0
 
@@ -1142,12 +1162,7 @@ class Board:
             c[0] += 1
             c[1] += s.group == "working"
         text = self.picker["text"].strip() if self.picker else ""
-        listed = self.projects()
-        have = {p for _, p in listed}
-        for path in self.pinned_projects() + [p for _, p in self.known]:  # then your pins, then everywhere you have used Claude Code
-            if path not in have and os.path.isdir(path):
-                listed.append((project_of("", path)[0], path))
-                have.add(path)
+        listed = self.all_projects()
         items = [
             (name, path, *counts.get(path, [0, 0]))
             for name, path in listed
@@ -1219,11 +1234,7 @@ class Board:
         self.meta.set_setting("projects", pins or None)
 
     def open_picker(self) -> None:
-        if self.known_projects_fn:
-            try:
-                self.known = self.known_projects_fn()
-            except Exception:  # the extra projects are a convenience; the picker works without them
-                self.known = []
+        self.refresh_known(0)
         paths = [i[1] for i in self.picker_items()]
         current = self.target()[1]
         self.picker = {"text": "", "idx": paths.index(current) if current in paths else 0}
@@ -1372,19 +1383,26 @@ class Board:
     # ── slash commands ──
     def slash_query(self) -> Optional[str]:
         """What follows the slash while the first word of the prompt is being typed; None when no list should show."""
-        blocked = self.sel is not None or self.mode in PR_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
-        if blocked or self.settingsui or self.confirm or self.help or self.peek:
+        if self._lists_blocked():
             return None
         token = self.slash_token()
         return None if token is None else token[1:]
 
-    def slash_token(self) -> Optional[str]:
-        """The word being typed, when it starts with a slash: `/cod` in "Create a mod /cod". None once a space follows it."""
+    def _lists_blocked(self) -> bool:
+        """The slash and @ lists belong to the prompt: they stay shut while anything else has the focus."""
+        blocked = self.sel is not None or self.mode in PR_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
+        return bool(blocked or self.settingsui or self.confirm or self.help or self.peek)
+
+    def _trailing_word(self, sign: str) -> Optional[str]:
+        """The word being typed at the caret when it starts with `sign`: `/cod` in "Create a mod /cod". None once a space follows it."""
         text = self.input
         if not text or text[-1].isspace() or self.cursor != len(text):
             return None
         word = text.split()[-1]
-        return word if word.startswith("/") else None
+        return word if word.startswith(sign) else None
+
+    def slash_token(self) -> Optional[str]:
+        return self._trailing_word("/")
 
     def slash_view(self) -> tuple[list, int]:
         """The commands matching what is typed, and the highlighted one (reset when the text changes)."""
@@ -1412,6 +1430,82 @@ class Board:
                 return False, None  # it is already typed out in full: enter starts the session
             self.input = f"{before}/{chosen.name} "
         return True, None
+
+    # ── @project mentions ──
+    def all_projects(self) -> list[tuple[str, str]]:
+        """Projects with sessions, then your pins, then everywhere you have used Claude Code: (name, path)."""
+        listed = self.projects()
+        have = {p for _, p in listed}
+        for path in self.pinned_projects() + [p for _, p in self.known]:
+            if path not in have and os.path.isdir(path):
+                listed.append((project_of("", path)[0], path))
+                have.add(path)
+        return listed
+
+    def refresh_known(self, max_age: float = 30.0) -> None:
+        if not self.known_projects_fn or self.now() - self.known_at < max_age:
+            return
+        self.known_at = self.now()
+        try:
+            self.known = self.known_projects_fn()
+        except Exception:  # the extra projects are a convenience; everything works without them
+            self.known = []
+
+    def mention_query(self) -> Optional[str]:
+        """What follows the @ while a mention is being typed; None when no list should show."""
+        if self._lists_blocked():
+            return None
+        token = self._trailing_word("@")
+        return None if token is None else token[1:]
+
+    def mention_view(self) -> tuple[list[tuple[str, str, int, int]], int]:
+        """The projects matching what follows the @ ((name, path, sessions, working)), and the highlighted one."""
+        query = self.mention_query()
+        matches: list[tuple[str, str, int, int]] = []
+        if query is not None:
+            self.refresh_known()
+            counts: dict[str, list[int]] = {}
+            for s in self.sessions:
+                c = counts.setdefault(s.project_path, [0, 0])
+                c[0] += 1
+                c[1] += s.group == "working"
+            matches = [(n, p, *counts.get(p, [0, 0])) for n, p in match_projects(self.all_projects(), query)]
+        if self.mention_state["query"] != query:
+            self.mention_state = {"query": query, "idx": 0}
+        self.mention_state["idx"] = max(0, min(self.mention_state["idx"], len(matches) - 1))
+        return matches, self.mention_state["idx"]
+
+    def _mention_key(self, key: str) -> bool:
+        """Arrows move through the project list, tab or enter put the highlighted project in the prompt as @name."""
+        matches, idx = self.mention_view()
+        if not matches or key not in ("up", "down", "tab", "enter"):
+            return False
+        token = self._trailing_word("@") or ""
+        if key == "up":
+            self.mention_state["idx"] = max(0, idx - 1)
+        elif key == "down":
+            self.mention_state["idx"] = min(len(matches) - 1, idx + 1)
+        else:
+            name = mention_name(matches[idx][0])
+            if key == "enter" and token.lower() == f"@{name.lower()}":
+                return False  # it is already typed out in full: enter starts the session
+            self.input = f"{self.input[: len(self.input) - len(token)]}@{name} "
+        return True
+
+    def resolve_mention(self, text: str) -> tuple[str, Optional[tuple[str, str]]]:
+        """(text without the mention, (name, path)) for the first @word naming a known project; others stay as typed."""
+        known = {mention_name(n).lower(): (n, p) for n, p in reversed(self.all_projects())}
+        for m in MENTION_RE.finditer(text):
+            hit = known.get(m.group(1).lower())
+            if hit:
+                end = m.end() + (1 if text[m.end() : m.end() + 1] in (" ", "\t") else 0)
+                return text[: m.start()] + text[end:], hit
+        return text, None
+
+    def start_target(self) -> tuple[str, str]:
+        """Where the session being typed would start: the project it @mentions, else the chosen one."""
+        mentioned = self.resolve_mention(self.input)[1] if "@" in self.input else None
+        return mentioned or self.target()
 
     # ── pull requests ──
     def pr_interval(self) -> int:
@@ -1800,9 +1894,9 @@ class Board:
         self.sel = None
         self.cursor = min(hit[2], key=lambda b: abs(hit[1] + b[0] - x))[1]
 
-    def prompt_text(self) -> str:
+    def prompt_text(self, text: Optional[str] = None) -> str:
         """The prompt as it will be sent: every chip replaced by the text it stands for."""
-        return PASTE_CHIP_RE.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), self.input)
+        return PASTE_CHIP_RE.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), self.input if text is None else text)
 
     def reset_prompt(self) -> None:
         self.input = ""
@@ -1898,6 +1992,8 @@ class Board:
         consumed, effect = self._slash_key(key)
         if consumed:
             return effect
+        if self._mention_key(key):
+            return None
         s = self.selected()
         if s is None and self._prompt_key(key):
             return None
@@ -1929,10 +2025,15 @@ class Board:
             if s:  # a selected session has the focus, whatever draft is waiting in the prompt
                 return Effect("attach", session_id=s.id)
             if self.input.strip():
-                prompt = self.prompt_text().strip()
+                typed, mentioned = self.resolve_mention(self.input)
+                if mentioned and not typed.strip():
+                    self.msg = f"write the task after @{mention_name(mentioned[0])}"
+                    return None
+                prompt = self.prompt_text(typed).strip()
+                cwd = mentioned[1] if mentioned else self.target()[1]
                 self.reset_prompt()
                 tags = [self.meta.add_tag(t) for t in suggest_tags(prompt, self.meta)]
-                return Effect("dispatch", prompt=prompt, cwd=self.target()[1], tags=tags, model=self.model())
+                return Effect("dispatch", prompt=prompt, cwd=cwd, tags=tags, model=self.model())
         elif key == "right" and s:
             return Effect("attach", session_id=s.id)
         elif key == "space" and s:
@@ -2158,6 +2259,22 @@ def strip_segs(board: Board, width: int) -> list[Seg]:
     return segs
 
 
+def _overlay_mention(lines: list[Line], width: int, matches: list, chosen: int) -> None:
+    """The projects above the prompt while an @mention is typed: @name, then sessions and path."""
+    rows_available = max(1, len(lines) - HEADER_ROWS - 1)
+    count = min(len(matches), SLASH_ROWS, rows_available)
+    start = max(0, min(chosen - count // 2, len(matches) - count))
+    shown: list[Line] = []
+    for i in range(start, start + count):
+        (name, path, total, working), on = matches[i], i == chosen
+        label = fit_tail(f"@{mention_name(name)}", SLASH_NAME_WIDTH)
+        stats = (f"{total} session{'s' if total != 1 else ''}" + (f" · {working} working" if working else "")) if total else "no sessions"
+        head: list[Seg] = [("❯ " if on else "  ", "accent"), (f"{label:<{SLASH_NAME_WIDTH}}", "name_sel" if on else "name"), ("  ", "normal")]
+        room = max(0, width - seg_width(head) - 1)
+        shown.append(Line(head + [(fit(f"{stats} · {path}", room), "dim")], on))
+    lines[len(lines) - count :] = shown
+
+
 SLASH_ROWS = 10
 SLASH_NAME_WIDTH = 34
 
@@ -2288,6 +2405,10 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         matches, chosen = board.slash_view()
         if matches:
             _overlay_slash(lines, width, matches, chosen)
+    elif board.mention_query() is not None:
+        matches, chosen = board.mention_view()
+        if matches:
+            _overlay_mention(lines, width, matches, chosen)
 
     lines.append(Line([("─" * width, "rule")]))
     board.prompt_hit = None
@@ -2311,7 +2432,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         lines.append(Line([(" ", "normal"), ("◆ " if n else "  ", "accent"), (text, "bold" if n else "faint")]))
     else:
         pre = [(" ❯ ", "accent")]
-        target_name, _ = board.target()
+        target_name, _ = board.start_target()
         chosen = board.model()
         model_seg = (model_label(chosen), "accent" if chosen else "faint")
         options = [
@@ -2522,18 +2643,21 @@ def _hint_segs(board: Board) -> list[Seg]:
     elif board.slash_query() is not None and board.slash_view()[0]:
         n = len(board.slash_view()[0])
         hint = f"↑/↓ choose · tab or enter completes · esc clears · {n} command{'s' if n != 1 else ''}"
+    elif board.mention_query() is not None and board.mention_view()[0]:
+        n = len(board.mention_view()[0])
+        hint = f"↑/↓ choose · tab or enter completes · esc clears · {n} project{'s' if n != 1 else ''} · the session starts there"
     elif board.input:
         full = board.prompt_text()
         previews = [t.label for t in derive_tags(full)] + suggest_tags(full, board.meta)
         if previews:
-            segs: list[Seg] = [(" ", "normal"), (f"enter start in {board.target()[0]} on {model_label(board.model())} · will tag ", "faint")]
+            segs: list[Seg] = [(" ", "normal"), (f"enter start in {board.start_target()[0]} on {model_label(board.model())} · will tag ", "faint")]
             for label in previews:
                 kind = "review" if label == "Code Review" else "ticket" if label.startswith("Ticket:") else "pr" if label.startswith("PR #") else "custom"
                 segs += [(f" {label} ", tag_style(Tag(label, kind))), (" ", "normal")]
             return segs + [("· backspace removes a pasted block" if board.pastes else "· ctrl+x cut", "faint")]
-        hint = f"enter start in {board.target()[0]} on {model_label(board.model())} · ctrl+x cut to clipboard · ctrl+y copy · ctrl+c clears · esc"
+        hint = f"enter start in {board.start_target()[0]} on {model_label(board.model())} · ctrl+x cut to clipboard · ctrl+y copy · ctrl+c clears · esc"
         if board.pastes:
-            hint = f"enter start in {board.target()[0]} on {model_label(board.model())} · backspace removes a pasted block · ctrl+x cut · ctrl+c clears"
+            hint = f"enter start in {board.start_target()[0]} on {model_label(board.model())} · backspace removes a pasted block · ctrl+x cut · ctrl+c clears"
     else:
         hint = "↑/↓ select · ctrl+f find · ctrl+s view · ctrl+p project · ? shortcuts · esc quit"
     return [(" ", "normal"), (hint, "faint")]
