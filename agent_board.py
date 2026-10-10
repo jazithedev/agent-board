@@ -876,6 +876,8 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x or ctrl+x again confirms)"),
         ("type, then enter", "start a new background session; it is selected, so → opens it"),
         ("/", "slash commands: type / for the list, ↑/↓ choose, tab or enter completes it"),
+        ("← / → / click", "move the caret in the prompt; ctrl+← / ctrl+→ by word, home / end to the ends"),
+        ("delete / ctrl+w", "delete the character after the caret / the word before it (alt+backspace too)"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
         ("ctrl+p", "choose the project a new session starts in"),
@@ -952,6 +954,7 @@ class Board:
         self.launch_cwd = launch_cwd
         self.mode = "status"  # status | project | review | mine
         self.input = ""
+        self.prompt_hit: Optional[tuple[int, int, list[tuple[int, int]]]] = None  # (row, first column, [(column, index)]) of the drawn prompt, for clicks
         self.pastes: dict[int, str] = {}  # the full text behind each [Pasted text #N] chip in the prompt
         self.paste_seq = 0
         self.query = ""
@@ -1268,7 +1271,7 @@ class Board:
     def slash_token(self) -> Optional[str]:
         """The word being typed, when it starts with a slash: `/cod` in "Create a mod /cod". None once a space follows it."""
         text = self.input
-        if not text or text[-1].isspace():
+        if not text or text[-1].isspace() or self.cursor != len(text):
             return None
         word = text.split()[-1]
         return word if word.startswith("/") else None
@@ -1536,10 +1539,12 @@ class Board:
             return Effect("attach", session_id=linked[0].id)
         return Effect("browse", url=pr.url)
 
-    def click(self, y: int) -> None:
-        """A click on a row selects it and opens it, like Enter would."""
+    def click(self, y: int, x: int = -1) -> None:
+        """A click on a row selects it and opens it, like Enter would; a click in the prompt moves its caret."""
         owner = self.hit.get(y)
         if not owner:
+            if x >= 0:
+                self.click_prompt(y, x)
             return
         if self.mode in PR_VIEWS:
             self.pr_sel = owner
@@ -1602,6 +1607,86 @@ class Board:
         self.pastes[self.paste_seq] = text
         return f"[Pasted text #{self.paste_seq}" + (f" +{newlines} lines" if newlines else "") + "]"
 
+    @property
+    def input(self) -> str:
+        return self._input
+
+    @input.setter
+    def input(self, value: str) -> None:
+        self._input = value
+        self.cursor = len(value)  # replacing the prompt wholesale leaves the caret at its end
+
+    def _put(self, value: str, cursor: int) -> None:
+        self._input, self.cursor = value, cursor
+
+    def _insert(self, text: str) -> None:
+        c = self.cursor
+        self._put((self._input[:c] + text + self._input[c:])[:20000], c + len(text))
+
+    def _forget_chips(self, removed: str) -> None:
+        for m in PASTE_CHIP_RE.finditer(removed):
+            self.pastes.pop(int(m.group(1)), None)
+
+    def _delete_range(self, start: int, end: int) -> None:
+        self._forget_chips(self._input[start:end])
+        self._put(self._input[:start] + self._input[end:], start)
+
+    def _prompt_key(self, key: str) -> bool:
+        """Caret movement and deletion in the prompt, as in Claude Code. A pasted-text chip counts as one character."""
+        toks = prompt_tokens(self._input)
+        c = self.cursor
+        before = [t for t in toks if t[1] <= c]
+        after = [t for t in toks if t[0] >= c]
+        if key in ("left", "right", "home", "end"):
+            if key == "left" and before:
+                self.cursor = before[-1][0]
+            elif key == "right" and after:
+                self.cursor = after[0][1]
+            elif key == "home":
+                self.cursor = 0
+            elif key == "end":
+                self.cursor = len(self._input)
+        elif key in ("ctrl+left", "alt+left"):
+            self.cursor = self._word_start(before)
+        elif key in ("ctrl+right", "alt+right"):
+            self.cursor = self._word_end(after)
+        elif key == "delete" and after:
+            self._delete_range(*after[0])
+        elif key in ("ctrl+w", "alt+backspace"):
+            self._delete_range(self._word_start(before), c)
+        elif key == "ctrl+delete":
+            self._delete_range(c, self._word_end(after))
+        else:
+            return False
+        return True
+
+    def _is_space(self, tok: tuple[int, int]) -> bool:
+        return self._input[tok[0] : tok[1]].isspace()
+
+    def _word_start(self, before: list[tuple[int, int]]) -> int:
+        i = len(before)
+        while i > 0 and self._is_space(before[i - 1]):
+            i -= 1
+        while i > 0 and not self._is_space(before[i - 1]):
+            i -= 1
+        return before[i][0] if i < len(before) else self.cursor
+
+    def _word_end(self, after: list[tuple[int, int]]) -> int:
+        i = 0
+        while i < len(after) and self._is_space(after[i]):
+            i += 1
+        while i < len(after) and not self._is_space(after[i]):
+            i += 1
+        return after[i - 1][1] if i else self.cursor
+
+    def click_prompt(self, y: int, x: int) -> None:
+        """A click in the prompt line puts the caret at the nearest character boundary."""
+        hit = self.prompt_hit
+        if not hit or y != hit[0] or not hit[2] or self.mode in PR_VIEWS:
+            return
+        self.sel = None
+        self.cursor = min(hit[2], key=lambda b: abs(hit[1] + b[0] - x))[1]
+
     def prompt_text(self) -> str:
         """The prompt as it will be sent: every chip replaced by the text it stands for."""
         return PASTE_CHIP_RE.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), self.input)
@@ -1640,9 +1725,9 @@ class Board:
         elif text:
             self.sel = None
             if len(text) > PASTE_CHIP_MIN_CHARS:
-                self.input += self.add_paste(text)
+                self._insert(self.add_paste(text))
             else:
-                self.input = (self.input + text)[:20000]
+                self._insert(text)
         return None
 
     def _handle_confirm(self, key: str, ch: str) -> Optional[Effect]:
@@ -1701,6 +1786,8 @@ class Board:
         if consumed:
             return effect
         s = self.selected()
+        if s is None and self._prompt_key(key):
+            return None
         if key == "esc":
             if s:
                 self.sel = None  # back to the prompt; a draft there is kept
@@ -1767,22 +1854,17 @@ class Board:
             self.reset_prompt()
         elif key == "ctrl+j":
             self.sel = None
-            self.input += "\n"
+            self._insert("\n")
         elif key == "backspace":
             self.sel = None
-            chip = None
-            for m in PASTE_CHIP_RE.finditer(self.input):
-                chip = m if m.end() == len(self.input) else chip
-            if chip:  # a pasted block goes in one backspace, as in Claude Code
-                self.pastes.pop(int(chip.group(1)), None)
-                self.input = self.input[: chip.start()]
-            else:
-                self.input = self.input[:-1]
+            before = [t for t in prompt_tokens(self._input) if t[1] <= self.cursor]
+            if before:  # a pasted block goes in one backspace, as in Claude Code
+                self._delete_range(before[-1][0], self.cursor)
         elif key == "char" and ch == "?" and not self.input:
             self.help = True
         elif key in ("char", "space"):
             self.sel = None
-            self.input += ch or " "
+            self._insert(ch or " ")
         return None
 
 
@@ -2095,6 +2177,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
             _overlay_slash(lines, width, matches, chosen)
 
     lines.append(Line([("─" * width, "rule")]))
+    board.prompt_hit = None
     caret: Optional[tuple[int, int]] = None
     input_y = len(lines)
     editing_setting = board.settingsui["edit"] if board.settingsui else None
@@ -2126,14 +2209,16 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         placeholder = "describe a task for a new session"
         room = inner - seg_width(pre) - (seg_width(prompt_segs(board.input, "bold")) if board.input else cell_width(placeholder)) - 2
         right = next((o for o in options if seg_width(o) <= room), options[-1])
+        caret_col = 0
         if board.input:
-            body_segs = tail_segs(prompt_segs(board.input, "bold" if board.sel is None else "dim"), inner - seg_width(pre) - seg_width(right) - 2)
+            body_segs, caret_col, bounds = prompt_window(board.input, board.cursor, inner - seg_width(pre) - seg_width(right) - 2, "bold" if board.sel is None else "dim")
+            board.prompt_hit = (input_y, seg_width(pre), bounds)
         else:
             body_segs = [("describe a task for a new session", "faint")]
         used = seg_width(pre) + seg_width(body_segs)
         lines.append(Line(pre + body_segs + [(" " * max(1, inner - used - seg_width(right)), "normal")] + right))
         if board.sel is None and not (board.help or board.peek or board.confirm or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
-            caret = (input_y, seg_width(pre) + (seg_width(body_segs) if board.input else 0))
+            caret = (input_y, seg_width(pre) + caret_col)
     lines.append(Line(_ellipsize(_hint_segs(board), inner)))
     if inline_caret:
         caret = inline_caret
@@ -2164,6 +2249,77 @@ def prompt_segs(text: str, style: str) -> list[Seg]:
     if pos < len(text):
         segs.append((text[pos:].replace("\n", " ⏎ "), style))
     return segs
+
+
+def prompt_tokens(text: str) -> list[tuple[int, int]]:
+    """The prompt's editable units as (start, end): each character, except a pasted-text chip, which is one unit."""
+    toks: list[tuple[int, int]] = []
+    pos = 0
+    for m in PASTE_CHIP_RE.finditer(text):
+        toks.extend((i, i + 1) for i in range(pos, m.start()))
+        toks.append((m.start(), m.end()))
+        pos = m.end()
+    toks.extend((i, i + 1) for i in range(pos, len(text)))
+    return toks
+
+
+def prompt_window(text: str, cursor: int, width: int, style: str) -> tuple[list[Seg], int, list[tuple[int, int]]]:
+    """The part of the prompt that fits `width` around the caret: (pieces, caret column, [(column, text index)]).
+
+    The caret always stays visible; what is cut off at either side is shown as …"""
+    toks = prompt_tokens(text)
+    items: list[tuple[str, str]] = []
+    for a, b in toks:
+        piece = text[a:b]
+        items.append((f" {piece} ", "chip_info") if PASTE_CHIP_RE.fullmatch(piece) else (piece.replace("\n", " ⏎ "), style))
+    wid = [cell_width(d) for d, _ in items]
+    n = len(items)
+    ci = sum(1 for t in toks if t[1] <= cursor)
+    lo, hi = 0, n
+    if sum(wid) > width:
+        after_room = min(sum(wid[ci:]), max(width // 3, 1))
+        before_room = width - after_room
+        if sum(wid[:ci]) < before_room:
+            before_room, after_room = sum(wid[:ci]), width - sum(wid[:ci])
+        used, lo = 0, ci
+        while lo > 0 and used + wid[lo - 1] <= before_room:
+            lo -= 1
+            used += wid[lo]
+        if lo > 0:
+            while lo < ci and used > before_room - 1:
+                used -= wid[lo]
+                lo += 1
+        used, hi = 0, ci
+        while hi < n and used + wid[hi] <= after_room:
+            used += wid[hi]
+            hi += 1
+        if hi < n:
+            while hi > ci and used > after_room - 1:
+                hi -= 1
+                used -= wid[hi]
+    segs: list[Seg] = []
+    bounds: list[tuple[int, int]] = []
+    col = 0
+    if lo > 0:
+        segs.append(("…", "faint"))
+        col = 1
+    caret_col = col
+    for i in range(lo, hi):
+        if i == ci:
+            caret_col = col
+        bounds.append((col, toks[i][0]))
+        text_i, style_i = items[i]
+        if segs and segs[-1][1] == style_i and style_i != "chip_info":
+            segs[-1] = (segs[-1][0] + text_i, style_i)
+        else:
+            segs.append((text_i, style_i))
+        col += wid[i]
+    if ci >= hi:
+        caret_col = col
+    bounds.append((col, toks[hi - 1][1] if hi > lo else (toks[lo][0] if lo < n else len(text))))
+    if hi < n:
+        segs.append(("…", "faint"))
+    return segs, caret_col, bounds
 
 
 def tail_segs(segs: list[Seg], width: int) -> list[Seg]:
@@ -2460,12 +2616,12 @@ def mouse_event(sel: Selection, board: Board, y: int, x: int, bstate: int, lines
         if sel.start == sel.end:
             sel.clear()
             if not modal:
-                board.click(y)
+                board.click(y, x)
         else:
             return selection_text(lines, sel.start, sel.end)
     elif bstate & _bit("BUTTON1_CLICKED"):
         if not modal:
-            board.click(y)
+            board.click(y, x)
     return None
 
 
@@ -2794,12 +2950,17 @@ class Painter:
 
 KEYS = {
     curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_RIGHT: "right", curses.KEY_LEFT: "left",
+    curses.KEY_HOME: "home", curses.KEY_END: "end", curses.KEY_DC: "delete", 23: "ctrl+w",
     curses.KEY_BACKSPACE: "backspace", 127: "backspace", 8: "backspace",
     13: "enter", curses.KEY_ENTER: "enter", 10: "ctrl+j", 22: "ctrl+v", 25: "ctrl+y", 5: "ctrl+e", 9: "tab",
     18: "ctrl+r", 20: "ctrl+t", 24: "ctrl+x", 19: "ctrl+s", 6: "ctrl+f", 16: "ctrl+p", 7: "ctrl+g", 21: "ctrl+u", 3: "ctrl+c", 1: "ctrl+a", 12: "ctrl+l", 15: "ctrl+o",
 }
 
 
+CSI_KEYS = {  # escape sequences curses did not decode itself (the part after ESC [)
+    "D": "left", "C": "right", "H": "home", "F": "end", "1~": "home", "7~": "home", "4~": "end", "8~": "end", "3~": "delete",
+    "1;5D": "ctrl+left", "1;5C": "ctrl+right", "1;3D": "alt+left", "1;3C": "alt+right", "3;5~": "ctrl+delete",
+}
 PASTE_START, PASTE_END = "[200~", "\x1b[201~"
 
 
@@ -2850,11 +3011,15 @@ def read_key(scr) -> tuple[str, str]:
                     if not isinstance(more, str):
                         break
                     seq += more
-                    if more == "~":
+                    if more == "~" or more.isalpha():
                         break
                 if seq == PASTE_START[1:]:
                     return "paste", _bracketed_paste(scr)
-                return "tick", ""
+                return CSI_KEYS.get(seq, "tick"), ""
+            if nxt == "\x7f":
+                return "alt+backspace", ""
+            if isinstance(nxt, str) and nxt in "bf":
+                return ("alt+left" if nxt == "b" else "alt+right"), ""
             if isinstance(nxt, str) and nxt in "123456":
                 return f"alt+{nxt}", ""
             return "tick", ""
@@ -2892,6 +3057,9 @@ def read_key(scr) -> tuple[str, str]:
         return "alt+up", ""
     if name == "kDN3":
         return "alt+down", ""
+    named = {"kLFT5": "ctrl+left", "kRIT5": "ctrl+right", "kLFT3": "alt+left", "kRIT3": "alt+right", "kDC5": "ctrl+delete", "kHOM": "home", "kEND": "end"}
+    if name in named:
+        return named[name], ""
     return KEYS.get(ch, "tick"), ""
 
 
