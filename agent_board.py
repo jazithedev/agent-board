@@ -245,6 +245,7 @@ MODEL_PRESETS = [
     ("Haiku 5.5", "claude-haiku-5-5", "full model id"),
 ]
 REFRESHING = "refreshing pull requests…"
+CONFIRM_KEY = "x"  # ctrl+x asks, x confirms: the same hand, the same key, for stopping, deleting and removing a tag
 PASTE_CHIP_MIN_CHARS = 800  # Claude Code collapses a longer paste into a chip: [Pasted text #1 +97 lines]
 PASTE_CHIP_RE = re.compile(r"\[Pasted text #(\d+)(?: \+(\d+) lines)?\]")
 PR_REFRESH_CHOICES = [0, 5, 10, 15, 30, 60]  # minutes between pull-request refreshes; 0 = only when asked
@@ -866,7 +867,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("ctrl+r", "rename the session (kept by the board only)"),
         ("ctrl+g", "tags: pick, create, rename, delete (ctrl+r / ctrl+x inside)"),
         ("ctrl+t", "pin the session to the top"),
-        ("ctrl+x", "stop a working or idle session / delete a finished one (asks first)"),
+        ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x confirms)"),
         ("type, then enter", "start a new background session from the prompt"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
@@ -1114,7 +1115,7 @@ class Board:
         tp = self.tagpicker
         if tp["delete"] is not None:
             label, tp["delete"] = tp["delete"], None
-            if key == "char" and ch.lower() == "y":
+            if key == "char" and ch.lower() == CONFIRM_KEY:
                 self.meta.delete_tag(label)
                 tp["idx"] = 0
                 self.msg = f"deleted tag “{label}”"
@@ -1578,7 +1579,7 @@ class Board:
 
     def _handle_confirm(self, key: str, ch: str) -> Optional[Effect]:
         c, self.confirm = self.confirm, None
-        if key == "char" and ch.lower() == "y":
+        if key == "char" and ch.lower() == CONFIRM_KEY:
             return Effect(c["kind"], session_id=c["sid"])
         self.msg = "cancelled"
         return None
@@ -2100,9 +2101,9 @@ def _hint_segs(board: Board) -> list[Seg]:
     if board.confirm:
         s = next((x for x in board.sessions if x.id == board.confirm["sid"]), None)
         verb = "Stop" if board.confirm["kind"] == "stop" else "Delete"
-        return [(" ", "normal"), (f"{verb} “{board.name_of(s) if s else '?'}”?", "warn"), ("  y to confirm · any other key cancels", "faint")]
+        return [(" ", "normal"), (f"{verb} “{board.name_of(s) if s else '?'}”?", "warn"), (f"  {CONFIRM_KEY} to confirm · any other key cancels", "faint")]
     if board.msg:
-        return [(" ", "normal"), (board.msg, "accent")]
+        return [(" ", "normal"), (board.msg, "fail" if board.msg.startswith("✗") else "accent")]
     if board.edit:
         hint = {
             "find": "type to filter · enter keep · esc clear",
@@ -2119,7 +2120,7 @@ def _hint_segs(board: Board) -> list[Seg]:
     elif board.tagpicker:
         tp = board.tagpicker
         if tp["delete"] is not None:
-            return [(" ", "normal"), (f"Delete tag “{tp['delete']}” from the library and every session?", "warn"), ("  y to confirm · any other key cancels", "faint")]
+            return [(" ", "normal"), (f"Delete tag “{tp['delete']}” from the library and every session?", "warn"), (f"  {CONFIRM_KEY} to confirm · any other key cancels", "faint")]
         hint = (
             "enter save · esc cancel" if tp["rename"] is not None
             else "↑/↓ move · enter toggle · type to filter or create · ctrl+r rename · ctrl+x delete · esc done"
@@ -2249,12 +2250,23 @@ def _overlay_tagpicker(board: Board, lines: list[Line], width: int) -> None:
     _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, f"tags · {fit(name, 40)}"), width)
 
 
+def wrap_lines(lines: list[str], width: int) -> list[str]:
+    """Word-wraps each line to `width`, keeping blank lines."""
+    import textwrap
+
+    out: list[str] = []
+    for line in lines:
+        out.extend(textwrap.wrap(line, max(10, width), break_long_words=True, break_on_hyphens=False) or [""])
+    return out
+
+
 def _overlay_peek(board: Board, lines: list[Line], width: int) -> None:
     p = board.peek
     body_h = len(lines) - HEADER_ROWS - 2
-    p["top"] = max(0, min(p["top"], max(0, len(p["lines"]) - body_h)))
-    shown = p["lines"][p["top"] : p["top"] + body_h]
     inner = width - 6
+    source = wrap_lines(p["lines"], inner) if p.get("wrap") else p["lines"]  # error text wraps; logs keep their own layout
+    p["top"] = max(0, min(p["top"], max(0, len(source) - body_h)))
+    shown = source[p["top"] : p["top"] + body_h]
     rows = [[(" " + fit(l, inner), "normal")] for l in shown]
     rows += [[(" ", "normal")] for _ in range(body_h - len(rows))]
     box = _box(rows, width, len(lines) - HEADER_ROWS, fit(p["title"], inner - 6))
@@ -2472,14 +2484,39 @@ def _is_stopped(pid: int) -> bool:
         return False
 
 
-def attach_session(claude: str, session_id: str, poll: float = 0.03) -> bool:
+@dataclass(frozen=True)
+class AttachResult:
+    cut: bool  # the screen change that follows pressing ← was cut off
+    returncode: Optional[int]
+    output: str  # what the session printed before the board took over again, without escape codes
+    killed: bool  # the board ended it itself (← relaunch, the session screen closed, Ctrl+Z)
+
+    @property
+    def failed(self) -> bool:
+        return not self.killed and self.returncode not in (0, None)
+
+
+def attach_failure_notice(result: AttachResult, name: str) -> Optional[tuple[str, list[str]]]:
+    """(footer message, popup lines) for a session that could not be opened, or None when nothing went wrong."""
+    if not result.failed:
+        return None
+    lines = [l.strip() for l in result.output.splitlines() if l.strip()]
+    reason = [l for l in lines if not l.startswith("Waking session")] or lines or ["claude attach stopped without saying why"]
+    advice = []
+    if "not trusted" in result.output.lower():
+        advice = ["", "Claude Code has not been told it may work in that folder yet. Run `claude` once there,",
+                  "accept the trust prompt, then open this session again."]
+    return f"✗ could not open “{name}”: details in the popup", reason + advice
+
+
+def attach_session(claude: str, session_id: str, poll: float = 0.03) -> AttachResult:
     """Runs `claude attach` behind a pseudo-terminal of our own and relays keys and output both ways.
 
     Why not hand it the real terminal: pressing ← makes `claude attach` leave its screen and start a fresh
     `claude agents`, which the board kills so you land back here. Seeing the output lets the board keep the
     terminal on its own screen throughout (ScreenFilter), and go quiet the moment the relaunch starts,
     instead of showing the normal terminal for about a second. Ctrl+Z (a stopped session) detaches too.
-    Returns True when the relaunch was cut off."""
+    Returns what happened: whether the relaunch was cut off, how the session ended and what it printed."""
     master, slave = pty.openpty()
     _copy_winsize(slave)
     proc = subprocess.Popen(
@@ -2490,6 +2527,7 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> bool:
     resized: list[int] = []
     previous = signal.signal(signal.SIGWINCH, lambda *_: resized.append(1))
     screen, cut, muted, last_scan = ScreenFilter(), False, False, 0.0
+    captured, painted, killed = b"", False, False
     stdin_fd, stdout_fd = sys.stdin.fileno(), sys.stdout.fileno()
     sys.stdout.flush()
     try:
@@ -2509,7 +2547,12 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> bool:
                 if not data:
                     break  # the session ended
                 if not muted:
-                    _write_all(stdout_fd, screen.feed(data))
+                    chunk = screen.feed(data)
+                    captured = (captured + chunk)[-8192:]  # only what the terminal is shown
+                    if chunk and not painted:
+                        painted = True
+                        chunk = ScreenFilter.CLEAR + chunk  # the session's first words must not land on top of the board
+                    _write_all(stdout_fd, chunk)
                     if screen.left:
                         muted = True
             if stdin_fd in ready:
@@ -2521,7 +2564,7 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> bool:
                 pids = [proc.pid] + descendants(proc.pid)
                 relaunched = any(is_agent_view_argv(read_argv(p)) or has_relaunch_marker(p) for p in pids)
                 if relaunched or screen.left or _is_stopped(proc.pid):
-                    cut, muted = cut or relaunched, True
+                    cut, muted, killed = cut or relaunched, True, True
                     for p in reversed(pids):
                         try:
                             os.kill(p, signal.SIGKILL)
@@ -2535,7 +2578,9 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> bool:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-    return cut
+            killed = True
+    text = ANSI_RE.sub("", captured.decode(errors="replace")).replace("\r", "")
+    return AttachResult(cut=cut, returncode=proc.returncode, output=text, killed=killed)
 
 
 # Everything the board turns on, switched off for the session we hand the terminal to. The alternate screen is
@@ -2965,8 +3010,9 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         scr.keypad(False)  # the terminal stays raw: attach_session relays every key to the session
         sys.stdout.write(HAND_OVER)
         sys.stdout.flush()
+        result = None
         try:
-            attach_session(CLAUDE, effect.session_id)
+            result = attach_session(CLAUDE, effect.session_id)
         finally:
             sys.stdout.write(SYNC_BEGIN + HAND_OVER + ENTER_ALT_SCREEN)
             sys.stdout.flush()
@@ -2977,6 +3023,11 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
             set_bracketed_paste(True)
             scr.clearok(True)  # repaint everything: the session drew over our screen
             board.sync_open = True
+        opened = next((x for x in board.sessions if x.id == effect.session_id), None)
+        notice = attach_failure_notice(result, board.name_of(opened) if opened else effect.session_id) if result else None
+        if notice:
+            board.msg = notice[0]
+            board.peek = {"title": f"could not open {board.name_of(opened) if opened else effect.session_id}", "lines": notice[1], "top": 0, "wrap": True}
         return True
     try:
         if effect.kind == "peek":

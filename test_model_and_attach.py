@@ -184,8 +184,13 @@ FAKE = textwrap.dedent(
     r"""
     #!/usr/bin/env python3
     import os, signal, sys, time, tty
-    tty.setraw(0)
     mode = sys.argv[2]
+    if mode == "fail":
+        sys.stderr.write("Waking session abc\u2026\r\n"); sys.stderr.flush(); time.sleep(0.3)
+        sys.stderr.write("Couldn't wake abc \u2014 Workspace not trusted. Run `claude` once there, then retry.\r\n"); sys.exit(1)
+    if mode == "okexit":
+        sys.stdout.write("bye\r\n"); sys.stdout.flush(); sys.exit(0)
+    tty.setraw(0)
     out = sys.stdout
     out.write("\x1b[?1049hFRAME-1 size=%dx%d\r\n" % tuple(os.get_terminal_size()))
     out.flush()
@@ -202,7 +207,7 @@ FAKE = textwrap.dedent(
 ).lstrip("\n")
 
 
-def run_bridge(mode, keys, wait=1.5, size=(40, 100)):
+def run_bridge(mode, keys, wait=1.5, size=(40, 100), full=False):
     """Runs attach_session in a child on a pseudo-terminal; returns (terminal output, seconds taken, typed log)."""
     tmp = Path(tempfile.mkdtemp())
     fake = tmp / "claude"
@@ -214,8 +219,10 @@ def run_bridge(mode, keys, wait=1.5, size=(40, 100)):
         os.environ["FAKE_LOG"] = str(log)
         tty.setraw(0)  # the board's terminal is always raw (curses); keys must reach the relay unbuffered
         started = time.time()
-        ab.attach_session(str(fake), mode)
-        result.write_text(str(time.time() - started))
+        outcome = ab.attach_session(str(fake), mode)
+        import json
+        result.write_text(json.dumps({"taken": time.time() - started, "cut": outcome.cut, "returncode": outcome.returncode,
+                                      "output": outcome.output, "killed": outcome.killed, "failed": outcome.failed}))
         os._exit(0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
 
@@ -242,8 +249,102 @@ def run_bridge(mode, keys, wait=1.5, size=(40, 100)):
     except OSError:
         pass
     os.waitpid(pid, 0)
-    taken = float(result.read_text()) if result.exists() else None
+    import json
+    details = json.loads(result.read_text()) if result.exists() else None
+    taken = details["taken"] if details else None
+    if full:
+        return out.decode(errors="replace"), taken, log.read_text() if log.exists() else "", details
     return out.decode(errors="replace"), taken, log.read_text() if log.exists() else ""
+
+
+class AttachOutcome(unittest.TestCase):
+    """What attach_session reports: did it fail, and what did the session say."""
+
+    def test_a_session_that_cannot_be_woken_is_a_failure_with_its_own_words(self):
+        out, taken, _, r = run_bridge("fail", [], wait=1.2, full=True)
+        self.assertTrue(r["failed"])
+        self.assertEqual(r["returncode"], 1)
+        self.assertFalse(r["killed"])
+        self.assertIn("Workspace not trusted", r["output"])
+        self.assertNotIn("\x1b", r["output"])  # escape codes stripped
+
+    def test_the_session_s_first_words_land_on_a_cleared_screen_never_on_top_of_the_board(self):
+        out, _, _, _ = run_bridge("fail", [], wait=1.2, full=True)
+        self.assertIn("\x1b[2J", out)
+        self.assertLess(out.index("\x1b[2J"), out.index("Waking session"))
+
+    def test_a_normal_exit_is_not_a_failure(self):
+        out, taken, _, r = run_bridge("okexit", [], wait=1.0, full=True)
+        self.assertFalse(r["failed"])
+        self.assertEqual(r["returncode"], 0)
+
+    def test_a_session_the_board_ended_itself_is_never_a_failure_even_though_it_was_killed(self):
+        _, _, _, left = run_bridge("leave", [b"x"], full=True)
+        self.assertTrue(left["killed"])
+        self.assertFalse(left["failed"])
+        self.assertNotIn("AFTER-LEAVE", left["output"])
+        _, _, _, stopped = run_bridge("stop", [b"z"], full=True)
+        self.assertTrue(stopped["killed"])
+        self.assertFalse(stopped["failed"])
+
+
+class FailureNotice(unittest.TestCase):
+    def result(self, output, returncode=1, killed=False):
+        return ab.AttachResult(cut=False, returncode=returncode, output=output, killed=killed)
+
+    def test_nothing_to_say_when_nothing_went_wrong(self):
+        self.assertIsNone(ab.attach_failure_notice(self.result("", 0), "x"))
+        self.assertIsNone(ab.attach_failure_notice(self.result("whatever", -9, killed=True), "x"))
+        self.assertIsNone(ab.attach_failure_notice(self.result("whatever", None), "x"))
+
+    def test_the_reason_drops_the_progress_line_and_the_footer_names_the_session(self):
+        footer, lines = ab.attach_failure_notice(self.result("Waking session abc…\nCouldn't wake abc — it broke.\n"), "clean view mod")
+        self.assertIn("clean view mod", footer)
+        self.assertTrue(footer.startswith("✗"))
+        self.assertEqual(lines, ["Couldn't wake abc — it broke."])
+
+    def test_an_untrusted_folder_gets_the_exact_fix(self):
+        _, lines = ab.attach_failure_notice(self.result("Couldn't wake abc — Workspace not trusted. Run `claude` in /x once."), "s")
+        text = " ".join(lines)
+        self.assertIn("accept the trust prompt", text)
+        self.assertIn("Run `claude` once there", text)
+
+    def test_silence_still_produces_something_to_read(self):
+        _, lines = ab.attach_failure_notice(self.result("   \n"), "s")
+        self.assertIn("without saying why", lines[0])
+
+    def test_failures_are_red_in_the_footer_and_other_notes_are_not(self):
+        b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/x", now=lambda: NOW)
+        b.msg = "✗ something failed"
+        self.assertEqual(ab._hint_segs(b)[1][1], "fail")
+        b.msg = "copied 3 characters"
+        self.assertEqual(ab._hint_segs(b)[1][1], "accent")
+
+
+class Wrapping(unittest.TestCase):
+    def test_lines_wrap_on_words_and_blank_lines_survive(self):
+        self.assertEqual(ab.wrap_lines(["aaa bbb ccc", "", "d"], 7), ["aaa bbb", "ccc", "", "d"])
+
+    def test_an_unbreakable_word_is_still_broken_to_fit(self):
+        self.assertTrue(all(len(l) <= 12 for l in ab.wrap_lines(["x" * 40], 12)))
+
+    def test_an_error_popup_shows_all_of_a_long_message_at_every_width_while_a_log_peek_still_truncates(self):
+        long = "Couldn't wake abc — Workspace not trusted. Run `claude` in /some/long/folder once and accept the trust prompt, then retry."
+        for width in (60, 80, 120):
+            b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/x", now=lambda: NOW)
+            b.peek = {"title": "could not open s", "lines": [long], "top": 0, "wrap": True}
+            text = " ".join(ab.plain(l).replace("│", " ") for l in ab.compose(b, width, 24)[0])
+            self.assertIn("then retry.", " ".join(text.split()), width)
+            for line in ab.compose(b, width, 24)[0]:
+                self.assertLessEqual(ab.seg_width(line.segs), width)
+        b.peek = {"title": "output", "lines": [long], "top": 0}  # a log: no wrap flag
+        self.assertIn("…", "\n".join(ab.plain(l) for l in ab.compose(b, 60, 24)[0]))
+
+    def test_the_popup_closes_with_any_key_and_the_board_is_usable_afterwards(self):
+        b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/x", now=lambda: NOW)
+        b.peek = {"title": "t", "lines": ["x"], "top": 0, "wrap": True}
+        b.handle("esc")
+        self.assertIsNone(b.peek)
 
 
 class AttachBridge(unittest.TestCase):

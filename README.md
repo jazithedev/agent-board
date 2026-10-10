@@ -220,7 +220,7 @@ sudo apt install wl-clipboard   # Wayland
 | `ctrl+p` · `ctrl+e` | choose the project · the model for new sessions |
 | `space` | peek at a session's recent output |
 | `ctrl+r` · `ctrl+g` · `ctrl+t` | rename · tags · pin |
-| `ctrl+x` | stop (working or idle) or delete (finished): asks first |
+| `ctrl+x` | stop (working or idle) or delete (finished): asks first, `x` confirms |
 | `ctrl+s` | next view: status, project, review queue, my pull requests |
 | `ctrl+f` | find |
 | `ctrl+l` · `ctrl+o` | refresh pull requests · settings |

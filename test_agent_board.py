@@ -184,10 +184,10 @@ class Interaction(unittest.TestCase):
     def test_stop_working_and_delete_done_need_confirmation(self):
         self.b.sel = "id1"
         self.b.handle("ctrl+x")
-        self.assertEqual(self.b.handle("char", "y"), ab.Effect("stop", session_id="id1"))
+        self.assertEqual(self.b.handle("char", "x"), ab.Effect("stop", session_id="id1"))
         self.b.sel = "id2"
         self.b.handle("ctrl+x")
-        self.assertEqual(self.b.handle("char", "y"), ab.Effect("remove", session_id="id2"))
+        self.assertEqual(self.b.handle("char", "x"), ab.Effect("remove", session_id="id2"))
         self.b.handle("ctrl+x")
         self.assertIsNone(self.b.handle("char", "n"))
 
@@ -230,6 +230,68 @@ class Interaction(unittest.TestCase):
         self.b.sel = "id2"
         self.b.set_sessions([make(1, "working")])
         self.assertIsNone(self.b.sel)
+
+
+class ConfirmWithX(unittest.TestCase):
+    """ctrl+x asks, x confirms; anything else (y included) cancels."""
+
+    def setUp(self):
+        self.b = board([make(1, "working", "alpha"), make(2, "done", "beta")])
+
+    def ask(self, sid):
+        self.b.sel = sid
+        self.b.handle("ctrl+x")
+
+    def test_x_confirms_stopping_a_working_session(self):
+        self.ask("id1")
+        self.assertEqual(self.b.handle("char", "x"), ab.Effect("stop", session_id="id1"))
+        self.assertIsNone(self.b.confirm)
+
+    def test_x_confirms_deleting_a_finished_session(self):
+        self.ask("id2")
+        self.assertEqual(self.b.handle("char", "x"), ab.Effect("remove", session_id="id2"))
+
+    def test_capital_x_works_too(self):
+        self.ask("id1")
+        self.assertEqual(self.b.handle("char", "X").kind, "stop")
+
+    def test_y_no_longer_confirms_it_cancels(self):
+        self.ask("id2")
+        self.assertIsNone(self.b.handle("char", "y"))
+        self.assertIsNone(self.b.confirm)
+        self.assertEqual(self.b.msg, "cancelled")
+
+    def test_any_other_key_cancels_and_nothing_is_run(self):
+        for key, ch in (("char", "n"), ("enter", ""), ("esc", ""), ("space", " ")):
+            self.ask("id2")
+            self.assertIsNone(self.b.handle(key, ch), key)
+            self.assertIsNone(self.b.confirm, key)
+
+    def test_pressing_ctrl_x_twice_does_not_confirm(self):
+        self.ask("id2")
+        self.assertIsNone(self.b.handle("ctrl+x"))
+        self.assertIsNone(self.b.confirm)
+
+    def test_the_footer_names_the_key(self):
+        self.ask("id2")
+        hint = ab.plain(ab.Line(ab._hint_segs(self.b)))
+        self.assertIn("x to confirm", hint)
+        self.assertNotIn("y to confirm", hint)
+
+    def test_deleting_a_tag_uses_the_same_key_and_the_same_wording(self):
+        self.b.meta.library = ["Bug"]
+        self.b.sel = "id1"
+        self.b.handle("ctrl+g")
+        self.b.handle("ctrl+x")
+        self.assertIn("x to confirm", ab.plain(ab.Line(ab._hint_segs(self.b))))
+        self.b.handle("char", "y")
+        self.assertIn("Bug", self.b.meta.library)  # y cancelled it
+        self.b.handle("ctrl+x")
+        self.b.handle("char", "x")
+        self.assertNotIn("Bug", self.b.meta.library)
+
+    def test_the_shared_constant_is_what_both_confirmations_use(self):
+        self.assertEqual(ab.CONFIRM_KEY, "x")
 
 
 class IdleSessions(unittest.TestCase):
@@ -352,7 +414,7 @@ class TagSystem(unittest.TestCase):
         self.b.handle("char", "n")
         self.assertIn("Bug", self.b.meta.library)
         self.b.handle("ctrl+x")
-        self.b.handle("char", "y")
+        self.b.handle("char", "x")
         self.assertNotIn("Bug", self.b.meta.library)
         self.assertEqual(self.applied(), [])
 
