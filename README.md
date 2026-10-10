@@ -127,7 +127,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - **Start a session** by typing in the prompt at the bottom: choose its **project** (`ctrl+p`) and its **model** (`ctrl+e`).
 - **Slash commands**: type `/` for the list of commands and skills, as in `claude agents`. It filters as you type, `↑` `↓` choose, and `tab` or `enter` completes. Your own skills and commands, those of your installed plugins and the project's are read from disk; Claude Code's built-in commands are a snapshot (2.1.296), and anything else you can still type by hand.
 - **Open a session** with Enter, → or a mouse click. Coming back to the board is instant: no flash of your normal terminal.
-- **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, and a half-written prompt survives while you open other sessions.
+- **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, and a half-written prompt survives while you open other sessions. The caret moves with `←` `→`, a click, `ctrl+←` / `ctrl+→` (by word) and `home` / `end`; `delete`, `ctrl+w` and `alt+backspace` edit around it.
 - **Mouse**: click opens a session; dragging highlights text live and copies it.
 
 **Pull requests** (optional). Two more views, reached with `ctrl+s`, for the projects that have sessions on the board:
