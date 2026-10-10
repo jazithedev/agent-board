@@ -978,6 +978,8 @@ class Board:
         self.refresh_requested = threading.Event()
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
+        self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
+        self.workers: list[threading.Thread] = []
         self.select_when_seen: Optional[tuple[str, float]] = None  # (id, when asked): a session just started from the prompt
 
     # ── data ──
@@ -1670,6 +1672,8 @@ class Board:
             n = int(key[4:]) - 1
             if 0 <= n < len(flat):
                 return Effect("attach", session_id=flat[n].id)
+        elif key in ("enter", "right", "space", "ctrl+x") and s and s.id in self.busy:
+            self.msg = f"“{self.name_of(s)}” is {self.busy[s.id]}"
         elif key == "enter":
             if s:  # a selected session has the focus, whatever draft is waiting in the prompt
                 return Effect("attach", session_id=s.id)
@@ -1742,12 +1746,17 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
         "idle": ("dim", "○"),
         "done": ("fail", "✗") if s.state in FAILED else ("done", "●"),
     }[s.group]
+    busy = board.busy.get(s.id)
+    if busy:  # being stopped or deleted right now: a spinner and a label, so it is clear that something is happening
+        icon_style, icon = "wait", SPINNER[board.tick % len(SPINNER)]
     pin = [("★ ", "accent")] if board.pinned(s) else []
     age = fmt_age(now - (s.started_at if s.group == "working" else s.updated_at)) if (s.started_at or s.updated_at) else ""
     project_chip: list[Seg] = [("● ", project_style(s.project)), (s.project, "dim")]
     right: list[Seg] = project_chip + [("  ", "normal"), (f"{age:>4}", "dim")]
     prefix: list[Seg] = [("▌" if selected else " ", "accent"), (" ", "normal"), (icon, icon_style), ("  ", "normal")] + pin
     chips: list[list[Seg]] = [[(f" {t.label} ", tag_style(t))] for t in board.tags_of(s)]
+    if busy:
+        chips = [[(f" {busy} ", "chip_warn")]]
     name = board.name_of(s)
     renaming = board.edit if (board.edit and board.edit["kind"] == "rename" and board.edit["sid"] == s.id) else None
     caret_x: Optional[int] = None
@@ -1764,7 +1773,7 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
             chips.pop()
         if total(name, chips) > width:
             name = fit(name, max(8, width - seg_width(prefix) - 2 - seg_width(right)))
-        left = prefix + [(name, "name_sel" if selected else "name")]
+        left = prefix + [(name, "dim" if busy else "name_sel" if selected else "name")]
         for c in chips:
             left += [(" ", "normal")] + c
     gap = max(1, width - seg_width(left) - seg_width(right))
@@ -1773,7 +1782,7 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
     branch = [(f"⎇ {s.branch}", "faint")] if s.branch else []
     indent = [("▌" if selected else " ", "accent"), ("    ", "normal")]
     avail = width - seg_width(indent) - (cell_width(branch[0][0]) + 2 if branch else 0) - 1
-    detail = fit(s.detail or "—", max(10, avail))
+    detail = fit(f"{busy} this can take a few seconds" if busy else (s.detail or "—"), max(10, avail))
     second_left = indent + [(detail, "dim")]
     gap = max(1, width - seg_width(second_left) - (cell_width(branch[0][0]) if branch else 0) - 1)
     second = Line(second_left + ([(" " * gap, "normal")] + branch if branch else []), selected)
@@ -3019,6 +3028,46 @@ def start_review_sessions(board: Board, items: list) -> None:
     board.set_sessions(load_sessions())
 
 
+ACTION_LABEL = {"stop": "stopping…", "remove": "removing…"}
+
+
+def run_session_action(board: Board, effect: Effect) -> None:
+    """Stops or deletes a session (blocking: this is the slow part) and reports how it went."""
+    s = next((x for x in board.sessions if x.id == effect.session_id), None)
+    label = f"“{board.name_of(s)}”" if s else effect.session_id
+    try:
+        if effect.kind == "remove":
+            run_cli(["stop", effect.session_id])  # a session whose process is still alive refuses to be deleted
+        r = run_cli(["stop" if effect.kind == "stop" else "rm", effect.session_id])
+    except (OSError, subprocess.SubprocessError) as exc:
+        board.msg = f"✗ could not {effect.kind} {label}: {exc}"
+        return
+    verb = "stopped" if effect.kind == "stop" else "deleted"
+    if r.returncode == 0:
+        board.msg = f"✓ {verb} {label}"
+    else:
+        reason = next((line for line in (r.stderr + "\n" + r.stdout).splitlines() if line.strip()), "no output")
+        board.msg = f"✗ could not {effect.kind} {label}: {reason.strip()}"
+    board.set_sessions(load_sessions())
+
+
+def start_session_action(board: Board, effect: Effect) -> threading.Thread:
+    """Runs a stop or delete in the background so the board keeps drawing; the row shows what is going on."""
+    board.busy[effect.session_id] = ACTION_LABEL[effect.kind]
+    board.msg = f"{ACTION_LABEL[effect.kind]}"
+
+    def work() -> None:
+        try:
+            run_session_action(board, effect)
+        finally:
+            board.busy.pop(effect.session_id, None)
+
+    worker = threading.Thread(target=work, daemon=True)
+    board.workers.append(worker)
+    worker.start()
+    return worker
+
+
 def register_new_session(board: Board, effect: Effect, first_line: str, started: bool) -> bool:
     """Tags a session just started from the prompt and arranges for it to be selected once it shows up,
     so one → opens it. Returns True when it will be selected."""
@@ -3083,18 +3132,7 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
             s = next((x for x in board.sessions if x.id == effect.session_id), None)
             board.peek = {"title": f"output · {board.name_of(s) if s else effect.session_id}", "lines": lines, "top": 10**6}
         elif effect.kind in ("stop", "remove"):
-            s = next((x for x in board.sessions if x.id == effect.session_id), None)
-            label = f"“{board.name_of(s)}”" if s else effect.session_id
-            if effect.kind == "remove":
-                run_cli(["stop", effect.session_id])  # a session whose process is still alive refuses to be deleted
-            r = run_cli(["stop" if effect.kind == "stop" else "rm", effect.session_id])
-            verb = "stopped" if effect.kind == "stop" else "deleted"
-            if r.returncode == 0:
-                board.msg = f"✓ {verb} {label}"
-            else:
-                reason = next((l for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), "no output")
-                board.msg = f"✗ could not {effect.kind} {label}: {reason.strip()}"
-            board.set_sessions(load_sessions())
+            start_session_action(board, effect)
         elif effect.kind == "dispatch":
             r = run_cli(bg_command(effect.prompt, effect.model), cwd=effect.cwd or None)
             first = (r.stdout or r.stderr).strip().split("\n")[0] or "session started"
