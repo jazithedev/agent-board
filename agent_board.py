@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import pullrequests as prs
+import slash
 
 __version__ = "0.2.0"
 
@@ -874,6 +875,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("ctrl+t", "pin the session to the top"),
         ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x or ctrl+x again confirms)"),
         ("type, then enter", "start a new background session; it is selected, so → opens it"),
+        ("/", "slash commands: type / for the list, ↑/↓ choose, tab or enter completes it"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
         ("ctrl+p", "choose the project a new session starts in"),
@@ -979,6 +981,8 @@ class Board:
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
+        self.slash_catalog = slash.Catalog()
+        self.slash_state: dict = {"query": None, "idx": 0}
         self.workers: list[threading.Thread] = []
         self.select_when_seen: Optional[tuple[str, float]] = None  # (id, when asked): a session just started from the prompt
 
@@ -1251,6 +1255,41 @@ class Board:
         for s in self.sessions:
             c[s.group] += 1
         return c
+
+    # ── slash commands ──
+    def slash_query(self) -> Optional[str]:
+        """What follows the slash while the first word of the prompt is being typed; None when no list should show."""
+        blocked = self.sel is not None or self.mode in PR_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
+        if blocked or self.settingsui or self.confirm or self.help or self.peek:
+            return None
+        if not self.input.startswith("/") or any(c.isspace() for c in self.input):
+            return None
+        return self.input[1:]
+
+    def slash_view(self) -> tuple[list, int]:
+        """The commands matching what is typed, and the highlighted one (reset when the text changes)."""
+        query = self.slash_query()
+        matches = [] if query is None else slash.match(self.slash_catalog.entries(self.target()[1]), query)
+        if self.slash_state["query"] != query:
+            self.slash_state = {"query": query, "idx": 0}
+        self.slash_state["idx"] = max(0, min(self.slash_state["idx"], len(matches) - 1))
+        return matches, self.slash_state["idx"]
+
+    def _slash_key(self, key: str) -> tuple[bool, Optional[Effect]]:
+        """(consumed, effect): arrows move through the list, tab or enter put the highlighted command in the prompt."""
+        matches, idx = self.slash_view()
+        if not matches or key not in ("up", "down", "tab", "enter"):
+            return False, None
+        if key == "up":
+            self.slash_state["idx"] = max(0, idx - 1)
+        elif key == "down":
+            self.slash_state["idx"] = min(len(matches) - 1, idx + 1)
+        else:
+            chosen = matches[idx]
+            if key == "enter" and self.input.lower() == f"/{chosen.name.lower()}":
+                return False, None  # it is already typed out in full: enter starts the session
+            self.input = f"/{chosen.name} "
+        return True, None
 
     # ── pull requests ──
     def pr_interval(self) -> int:
@@ -1649,6 +1688,9 @@ class Board:
             return None
         if self.mode in PR_VIEWS:
             return self._handle_pr_view(key, ch)
+        consumed, effect = self._slash_key(key)
+        if consumed:
+            return effect
         s = self.selected()
         if key == "esc":
             if s:
@@ -1912,6 +1954,25 @@ def strip_segs(board: Board, width: int) -> list[Seg]:
     return segs
 
 
+SLASH_ROWS = 10
+SLASH_NAME_WIDTH = 34
+
+
+def _overlay_slash(lines: list[Line], width: int, matches: list, chosen: int) -> None:
+    """The list of commands above the prompt, as `claude agents` shows it: /name, then kind · description."""
+    rows_available = max(1, len(lines) - HEADER_ROWS - 1)
+    count = min(len(matches), SLASH_ROWS, rows_available)
+    start = max(0, min(chosen - count // 2, len(matches) - count))
+    shown: list[Line] = []
+    for i in range(start, start + count):
+        entry, on = matches[i], i == chosen
+        name = fit_tail(f"/{entry.name}", SLASH_NAME_WIDTH)  # a long name keeps its end, which tells them apart
+        head: list[Seg] = [("❯ " if on else "  ", "accent"), (f"{name:<{SLASH_NAME_WIDTH}}", "name_sel" if on else "name"), ("  ", "normal")]
+        room = max(0, width - seg_width(head) - 1)
+        shown.append(Line(head + [(fit(f"{entry.kind} · {entry.description}", room), "dim")], on))
+    lines[len(lines) - count :] = shown
+
+
 def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
     ui = board.settingsui
     fields = board.settings_fields()
@@ -2018,6 +2079,11 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         _overlay_settings(board, lines, width)
     if board.peek:
         _overlay_peek(board, lines, width)
+
+    if board.slash_query() is not None:
+        matches, chosen = board.slash_view()
+        if matches:
+            _overlay_slash(lines, width, matches, chosen)
 
     lines.append(Line([("─" * width, "rule")]))
     caret: Optional[tuple[int, int]] = None
@@ -2175,6 +2241,9 @@ def _hint_segs(board: Board) -> list[Seg]:
         s = board.selected()
         stop = "stop" if s and s.group in ("working", "idle") else "delete"
         hint = ("draft kept · " if board.input else "") + f"enter open · space peek · ctrl+r rename · ctrl+g tags · ctrl+t pin · ctrl+x {stop} · ? shortcuts"
+    elif board.slash_query() is not None and board.slash_view()[0]:
+        n = len(board.slash_view()[0])
+        hint = f"↑/↓ choose · tab or enter completes · esc clears · {n} command{'s' if n != 1 else ''}"
     elif board.input:
         full = board.prompt_text()
         previews = [t.label for t in derive_tags(full)] + suggest_tags(full, board.meta)
@@ -2717,7 +2786,7 @@ class Painter:
 KEYS = {
     curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_RIGHT: "right", curses.KEY_LEFT: "left",
     curses.KEY_BACKSPACE: "backspace", 127: "backspace", 8: "backspace",
-    13: "enter", curses.KEY_ENTER: "enter", 10: "ctrl+j", 22: "ctrl+v", 25: "ctrl+y", 5: "ctrl+e",
+    13: "enter", curses.KEY_ENTER: "enter", 10: "ctrl+j", 22: "ctrl+v", 25: "ctrl+y", 5: "ctrl+e", 9: "tab",
     18: "ctrl+r", 20: "ctrl+t", 24: "ctrl+x", 19: "ctrl+s", 6: "ctrl+f", 16: "ctrl+p", 7: "ctrl+g", 21: "ctrl+u", 3: "ctrl+c", 1: "ctrl+a", 12: "ctrl+l", 15: "ctrl+o",
 }
 

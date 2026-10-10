@@ -37,6 +37,12 @@ class ReadKey(unittest.TestCase):
         self.assertEqual(read("\r"), ("enter", ""))
         self.assertEqual(read("\n"), ("ctrl+j", ""))
 
+    def test_tab_is_a_key_so_commands_can_be_completed_with_it(self):
+        self.assertEqual(read("\t"), ("tab", ""))
+
+    def test_a_tab_inside_pasted_text_is_still_just_text(self):
+        self.assertEqual(read("a", "\t", "b"), ("paste", "a\tb"))
+
     def test_ctrl_v_is_reported_so_the_clipboard_can_be_read(self):
         self.assertEqual(read("\x16"), ("ctrl+v", ""))
 
