@@ -183,8 +183,9 @@ class Installer(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp())
         self.remote = self.home / "remote"
         self.remote.mkdir()
-        for name in ("agent_board.py", "pullrequests.py"):
-            shutil.copy(ROOT / name, self.remote / name)
+        for module in ROOT.glob("*.py"):
+            if not module.name.startswith("test_"):
+                shutil.copy(module, self.remote / module.name)  # every module the board imports, so a new one cannot be forgotten
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-C", str(self.remote)]
         subprocess.run(["git", "-C", str(self.remote), "init", "-q"], check=True)
         subprocess.run(git + ["add", "."], check=True)
@@ -267,8 +268,12 @@ class Packaging(unittest.TestCase):
         self.assertIn('attr = "agent_board.__version__"', text)
         self.assertIn('agent-board = "agent_board:cli"', text)
 
-    def test_both_modules_ship(self):
-        self.assertIn('py-modules = ["agent_board", "pullrequests"]', (ROOT / "pyproject.toml").read_text())
+    def test_every_module_ships_in_the_wheel(self):
+        import re
+
+        listed = set(re.search(r"py-modules = \[([^\]]*)\]", (ROOT / "pyproject.toml").read_text()).group(1).replace('"', "").replace(" ", "").split(","))
+        on_disk = {p.stem for p in ROOT.glob("*.py") if not p.name.startswith("test_")}
+        self.assertEqual(listed, on_disk, "pyproject.toml py-modules and the modules on disk differ: the wheel would miss one")
 
     def test_nothing_personal_is_published_no_real_email_addresses_and_no_home_directories(self):
         import re

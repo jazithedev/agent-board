@@ -125,6 +125,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - **Tags**: `Code Review`, `Ticket: ABC-123` and `PR #42` are recognised from a session's text. Add your own from a picker (`ctrl+g`): create, rename and delete tags, and new sessions get suggested tags from your first prompt (editable rules).
 - **Rename, pin, stop, delete, peek** at a session's recent output, all from the keyboard.
 - **Start a session** by typing in the prompt at the bottom: choose its **project** (`ctrl+p`) and its **model** (`ctrl+e`).
+- **Slash commands**: type `/` for the list of commands and skills, as in `claude agents`. It filters as you type, `↑` `↓` choose, and `tab` or `enter` completes. Your own skills and commands, those of your installed plugins and the project's are read from disk; Claude Code's built-in commands are a snapshot (2.1.296), and anything else you can still type by hand.
 - **Open a session** with Enter, → or a mouse click. Coming back to the board is instant: no flash of your normal terminal.
 - **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, and a half-written prompt survives while you open other sessions.
 - **Mouse**: click opens a session; dragging highlights text live and copies it.
@@ -217,6 +218,7 @@ sudo apt install wl-clipboard   # Wayland
 | `↑` `↓` · click | select a session · open it |
 | `enter` `→` | open the selected session |
 | type, then `enter` | start a new background session; it is selected, so `→` opens it |
+| `/` | list slash commands and skills: `↑` `↓` choose, `tab` or `enter` completes |
 | `ctrl+p` · `ctrl+e` | choose the project · the model for new sessions |
 | `space` | peek at a session's recent output |
 | `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row) · tags · pin |
