@@ -216,11 +216,11 @@ sudo apt install wl-clipboard   # Wayland
 |---|---|
 | `↑` `↓` · click | select a session · open it |
 | `enter` `→` | open the selected session |
-| type, then `enter` | start a new background session |
+| type, then `enter` | start a new background session; it is selected, so `→` opens it |
 | `ctrl+p` · `ctrl+e` | choose the project · the model for new sessions |
 | `space` | peek at a session's recent output |
-| `ctrl+r` · `ctrl+g` · `ctrl+t` | rename · tags · pin |
-| `ctrl+x` | stop (working or idle) or delete (finished): asks first, `x` confirms |
+| `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row) · tags · pin |
+| `ctrl+x` | stop (working or idle) or delete (finished): asks first, `x` or `ctrl+x` again confirms |
 | `ctrl+s` | next view: status, project, review queue, my pull requests |
 | `ctrl+f` | find |
 | `ctrl+l` · `ctrl+o` | refresh pull requests · settings |
