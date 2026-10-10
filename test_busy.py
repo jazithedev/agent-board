@@ -175,5 +175,67 @@ class KeysOnABusyRow(unittest.TestCase):
                 self.assertLessEqual(ab.seg_width(line.segs), width, ab.plain(line))
 
 
+class SlowStart(SlowCli):
+    def __call__(self, args, cwd=None, timeout=60):
+        self.calls.append(args)
+        self.started.set()
+        self.release.wait(5)
+        return SimpleNamespace(returncode=0, stdout="backgrounded · cafe1234 (idle)", stderr="")
+
+
+class StartingASession(unittest.TestCase):
+    def effect(self):
+        return ab.Effect("dispatch", prompt="fix the login bug", cwd="/srv/www/p", tags=[])
+
+    def test_the_row_appears_and_is_selected_before_claude_answers(self):
+        b, cli = board(), SlowStart()
+        with patched(cli, []):
+            started = time.time()
+            self.assertTrue(ab.perform(None, b, self.effect(), None))
+            self.assertLess(time.time() - started, 1.0)  # the board is not frozen waiting for `claude --bg`
+            self.assertTrue(cli.started.wait(2))
+            self.assertEqual(b.sel, "starting-1")
+            lines, _ = ab.compose(b, 110, 24)
+            row = next(l for l in lines if "fix the login bug" in ab.plain(l))
+            self.assertIn("starting…", ab.plain(row))
+            finish(b, cli)
+
+    def test_the_real_session_takes_over_the_row_and_the_selection(self):
+        b, cli = board(), SlowStart()
+        real = ab.Session(id="cafe1234", name="fix the login bug", state="working", project="p", project_path="/srv/www/p", started_at=NOW, updated_at=NOW)
+        with patched(cli, [session(1, "alpha", "working"), real]):
+            ab.perform(None, b, self.effect(), None)
+            finish(b, cli)
+        self.assertEqual(b.sel, "cafe1234")
+        self.assertEqual(b.placeholders, [])
+        self.assertEqual(b.busy, {})
+        self.assertNotIn("starting-1", [s.id for s in b.sessions])
+
+    def test_a_refresh_while_starting_keeps_the_row(self):
+        b, cli = board(), SlowStart()
+        with patched(cli, []):
+            ab.perform(None, b, self.effect(), None)
+            b.set_sessions([session(1, "alpha", "working")])
+            self.assertIn("starting-1", [s.id for s in b.sessions])
+            finish(b, cli)
+
+    def test_a_failed_start_removes_the_row_and_says_why(self):
+        b, cli = board(), SlowCli(returncode=1, stderr="no such directory")
+        with patched(cli, [session(1, "alpha", "working")]):
+            ab.perform(None, b, self.effect(), None)
+            finish(b, cli)
+        self.assertEqual(b.placeholders, [])
+        self.assertIsNone(b.sel)
+        self.assertIn("no such directory", b.msg)
+
+    def test_the_starting_row_cannot_be_opened(self):
+        b, cli = board(), SlowStart()
+        with patched(cli, []):
+            ab.perform(None, b, self.effect(), None)
+            self.assertIsNone(b.handle("right"))
+            self.assertIn("starting", b.msg)
+            finish(b, cli)
+
+
 if __name__ == "__main__":
     unittest.main()

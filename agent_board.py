@@ -988,10 +988,32 @@ class Board:
         self.slash_state: dict = {"query": None, "idx": 0}
         self.workers: list[threading.Thread] = []
         self.select_when_seen: Optional[tuple[str, float]] = None  # (id, when asked): a session just started from the prompt
+        self.placeholders: list[Session] = []  # rows for sessions still being started, until the real ones show up
+        self.placeholder_seq = 0
 
     # ── data ──
+    def start_placeholder(self, prompt: str, cwd: str) -> str:
+        """Puts a "starting…" row on the list at once, selected, so the prompt feels answered while `claude --bg` runs."""
+        self.placeholder_seq += 1
+        sid = f"starting-{self.placeholder_seq}"
+        project, path = project_of("", cwd)
+        now = self.now()
+        self.placeholders.append(Session(id=sid, name=" ".join(prompt.split())[:60], state="working", cwd=cwd, project=project, project_path=path, started_at=now, updated_at=now))
+        self.busy[sid] = "starting…"
+        self.sessions = self.sessions + self.placeholders[-1:]
+        self.sel = sid
+        return sid
+
+    def finish_placeholder(self, sid: str, real_id: Optional[str] = None) -> None:
+        """Swaps the "starting…" row for the real session: the selection moves over if it was still on the row."""
+        self.placeholders = [p for p in self.placeholders if p.id != sid]
+        self.busy.pop(sid, None)
+        self.sessions = [x for x in self.sessions if x.id != sid]
+        if self.sel == sid:
+            self.sel = real_id if real_id and any(x.id == real_id for x in self.sessions) else None
+
     def set_sessions(self, sessions: list[Session]) -> None:
-        self.sessions = sessions
+        self.sessions = sessions + self.placeholders
         if self.sel and self.sel not in {s.id for s in sessions}:
             self.sel = None
         if self.select_when_seen:
@@ -1546,6 +1568,9 @@ class Board:
             if x >= 0:
                 self.click_prompt(y, x)
             return
+        if owner in self.busy:
+            self.msg = f"{self.busy[owner]}"
+            return
         if self.mode in PR_VIEWS:
             self.pr_sel = owner
             pr = self.selected_pr()
@@ -1808,7 +1833,7 @@ class Board:
         elif key.startswith("alt+") and key[4:].isdigit():
             flat = self.flat()
             n = int(key[4:]) - 1
-            if 0 <= n < len(flat):
+            if 0 <= n < len(flat) and flat[n].id not in self.busy:
                 return Effect("attach", session_id=flat[n].id)
         elif key in ("enter", "right", "space", "ctrl+x") and s and s.id in self.busy:
             self.msg = f"“{self.name_of(s)}” is {self.busy[s.id]}"
@@ -3314,6 +3339,36 @@ def start_session_action(board: Board, effect: Effect) -> threading.Thread:
     return worker
 
 
+def run_dispatch(board: Board, effect: Effect) -> Optional[str]:
+    """Starts the background session (blocking: this is the slow part); returns its id once it is known."""
+    r = run_cli(bg_command(effect.prompt, effect.model), cwd=effect.cwd or None)
+    first = (r.stdout or r.stderr).strip().split("\n")[0] or "session started"
+    selecting = register_new_session(board, effect, first, r.returncode == 0)
+    board.msg = first + (f" · tagged {', '.join(effect.tags)}" if effect.tags else "") + (f" · on {model_label(effect.model)}" if effect.model else "") + (" · → opens it" if selecting else "")
+    return board.select_when_seen[0] if selecting and board.select_when_seen else None
+
+
+def start_dispatch(board: Board, effect: Effect) -> threading.Thread:
+    """Starts a new session without freezing the board: its row appears at once as "starting…"."""
+    sid = board.start_placeholder(effect.prompt, effect.cwd)
+    board.msg = "starting…"
+
+    def work() -> None:
+        real_id = None
+        try:
+            real_id = run_dispatch(board, effect)
+            board.set_sessions(load_sessions())
+        except Exception as exc:  # the row must not be left spinning, whatever went wrong
+            board.msg = f"✗ dispatch failed: {exc}"
+        finally:
+            board.finish_placeholder(sid, real_id)
+
+    worker = threading.Thread(target=work, daemon=True)
+    board.workers.append(worker)
+    worker.start()
+    return worker
+
+
 def register_new_session(board: Board, effect: Effect, first_line: str, started: bool) -> bool:
     """Tags a session just started from the prompt and arranges for it to be selected once it shows up,
     so one → opens it. Returns True when it will be selected."""
@@ -3380,11 +3435,7 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         elif effect.kind in ("stop", "remove"):
             start_session_action(board, effect)
         elif effect.kind == "dispatch":
-            r = run_cli(bg_command(effect.prompt, effect.model), cwd=effect.cwd or None)
-            first = (r.stdout or r.stderr).strip().split("\n")[0] or "session started"
-            selecting = register_new_session(board, effect, first, r.returncode == 0)
-            board.msg = first + (f" · tagged {', '.join(effect.tags)}" if effect.tags else "") + (f" · on {model_label(effect.model)}" if effect.model else "") + (" · → opens it" if selecting else "")
-            board.set_sessions(load_sessions())
+            start_dispatch(board, effect)
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"{effect.kind} failed: {exc}"
     return True
