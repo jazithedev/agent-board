@@ -454,6 +454,63 @@ def parse_turn(line: bytes) -> Optional[tuple[str, Turn]]:
     )
 
 
+_CWD_RE = re.compile(r'"cwd":\s*"((?:[^"\\]|\\.)*)"')
+_known_cache: dict[str, tuple[float, str]] = {}  # transcript folder -> (newest transcript mtime, directory it was run in)
+
+
+def _transcript_cwd(folder: Path) -> Optional[tuple[float, str]]:
+    """The directory Claude Code was last run in for this transcript folder, read from its newest transcripts."""
+    try:
+        files = sorted(folder.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    if not files:
+        return None
+    mtime = files[0].stat().st_mtime
+    cached = _known_cache.get(str(folder))
+    if cached and cached[0] == mtime:
+        return cached
+    for path in files[:3]:
+        try:
+            with open(path, "rb") as f:
+                for _ in range(300):
+                    line = f.readline()
+                    if not line:
+                        break
+                    found = _CWD_RE.search(line.decode(errors="ignore"))
+                    if found:
+                        try:
+                            cwd = json.loads(f'"{found.group(1)}"')
+                        except ValueError:
+                            continue
+                        _known_cache[str(folder)] = (mtime, cwd)
+                        return mtime, cwd
+        except OSError:
+            continue
+    return None
+
+
+def known_projects(root: Path = PROJECTS_DIR) -> list[tuple[str, str]]:
+    """(name, path) of every directory Claude Code has been used in on this machine, most recently used first.
+
+    Worktrees fold into their repository; directories that no longer exist and hidden ones (.claude/jobs, …) are left out."""
+    found: dict[str, float] = {}
+    try:
+        folders = [p for p in root.iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    for folder in folders:
+        hit = _transcript_cwd(folder)
+        if not hit:
+            continue
+        mtime, cwd = hit
+        _, path = project_of("", cwd)
+        if any(part.startswith(".") for part in path.split("/") if part) or not os.path.isdir(path):
+            continue
+        found[path] = max(found.get(path, 0.0), mtime)
+    return [(project_of("", path)[0], path) for path, _ in sorted(found.items(), key=lambda kv: -kv[1])]
+
+
 class UsageScanner:
     """Reads Claude Code transcripts incrementally: only bytes appended since the last scan are parsed."""
 
@@ -880,7 +937,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("delete / ctrl+w", "delete the character after the caret / the word before it (alt+backspace too)"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
-        ("ctrl+p", "choose the project a new session starts in"),
+        ("ctrl+p", "choose the project a new session starts in: every project you have used Claude Code in is listed; ctrl+t inside pins one"),
         ("ctrl+e", "choose the model new sessions use (alias or any model id)"),
         ("ctrl+f", "find a session"),
         *HELP_COMMON_END,
@@ -988,6 +1045,8 @@ class Board:
         self.slash_state: dict = {"query": None, "idx": 0}
         self.workers: list[threading.Thread] = []
         self.select_when_seen: Optional[tuple[str, float]] = None  # (id, when asked): a session just started from the prompt
+        self.known_projects_fn: Optional[Callable[[], list[tuple[str, str]]]] = None  # set by the app: directories Claude Code has been used in
+        self.known: list[tuple[str, str]] = []
         self.placeholders: list[Session] = []  # rows for sessions still being started, until the real ones show up
         self.placeholder_seq = 0
 
@@ -1083,9 +1142,15 @@ class Board:
             c[0] += 1
             c[1] += s.group == "working"
         text = self.picker["text"].strip() if self.picker else ""
+        listed = self.projects()
+        have = {p for _, p in listed}
+        for path in self.pinned_projects() + [p for _, p in self.known]:  # then your pins, then everywhere you have used Claude Code
+            if path not in have and os.path.isdir(path):
+                listed.append((project_of("", path)[0], path))
+                have.add(path)
         items = [
             (name, path, *counts.get(path, [0, 0]))
-            for name, path in self.projects()
+            for name, path in listed
             if text.lower() in name.lower() or text.lower() in path.lower()
         ]
         if text[:1] in ("/", "~"):
@@ -1139,8 +1204,27 @@ class Board:
             p["text"], p["idx"] = p["text"] + (ch or " "), 0
         return None
 
+    def pinned_projects(self) -> list[str]:
+        value = self.meta.settings.get("projects")
+        return [str(p) for p in value] if isinstance(value, list) else []
+
+    def toggle_pinned_project(self, path: str, name: str) -> None:
+        pins = self.pinned_projects()
+        if path in pins:
+            pins.remove(path)
+            self.msg = f"unpinned {name}"
+        else:
+            pins.append(path)
+            self.msg = f"pinned {name}: it stays in this list"
+        self.meta.set_setting("projects", pins or None)
+
     def open_picker(self) -> None:
-        paths = [p for _, p in self.projects()]
+        if self.known_projects_fn:
+            try:
+                self.known = self.known_projects_fn()
+            except Exception:  # the extra projects are a convenience; the picker works without them
+                self.known = []
+        paths = [i[1] for i in self.picker_items()]
         current = self.target()[1]
         self.picker = {"text": "", "idx": paths.index(current) if current in paths else 0}
 
@@ -1234,6 +1318,10 @@ class Board:
             self.picker = None
         elif key == "backspace":
             p["text"], p["idx"] = p["text"][:-1], 0
+        elif key == "ctrl+t":
+            if items:
+                name, path, _, _ = items[min(p["idx"], len(items) - 1)]
+                self.toggle_pinned_project(path, name)
         elif key == "ctrl+u":
             p["text"], p["idx"] = "", 0
         elif key in ("char", "space"):
@@ -2484,17 +2572,20 @@ def _overlay_picker(board: Board, lines: list[Line], width: int) -> None:
     items = board.picker_items()
     p["idx"] = min(p["idx"], max(0, len(items) - 1))
     current = board.target()[1]
+    pins = set(board.pinned_projects())
     rows: list[list[Seg]] = [[(" ⌕ ", "accent"), (p["text"] or "filter, or type a /path", "bold" if p["text"] else "faint"), (" ", "normal")], [("", "normal")]]
     for i, (name, path, total, working) in enumerate(items):
         on = i == p["idx"]
         mark = "✓" if path == current else " "
-        stats = f"{total} session{'s' if total != 1 else ''}" + (f" · {working} working" if working else "")
+        stats = f"{total} session{'s' if total != 1 else ''}" + (f" · {working} working" if working else "") if total else "no sessions"
+        star = "★" if path in pins else " "
         rows.append([
             (" ▸ " if on else "   ", "accent"), (f"{mark} ", "done"), ("● ", project_style(name)),
-            (f"{name:<22}", "name_sel" if on else "name"), (f"{stats:<24}", "dim"), (fit(path, 40), "faint"), (" ", "normal"),
+            (f"{fit(name, 20):<20}", "name_sel" if on else "name"), (f"{star} ", "accent"), (f"{stats:<24}", "dim" if total else "faint"), (fit(path, 40), "faint"), (" ", "normal"),
         ])
     if not items:
         rows.append([("   no match — start with / or ~ to use any directory ", "faint")])
+    rows += [[("", "normal")], [("   ★ pinned · ctrl+t pins or unpins the highlighted project (type a /path first to pin any directory)", "faint")]]
     _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, "start new sessions in"), width)
 
 
@@ -3466,6 +3557,7 @@ def main_loop(scr, demo: bool) -> None:
     screen_text: list[str] = []
     painter = Painter()
     board = Board(Meta(), os.getcwd())
+    board.known_projects_fn = known_projects
     if demo:
         board.set_sessions(demo_sessions(board.now()))
     else:
