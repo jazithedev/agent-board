@@ -64,6 +64,16 @@ class KnownProjects(unittest.TestCase):
         transcript(self.root, "-hidden", hidden, 1000)
         self.assertEqual(ab.known_projects(self.root), [])
 
+    def test_a_folder_without_transcripts_is_read_from_its_name(self):
+        (repo,) = self.dirs("ai-market place".replace(" ", "-"))  # a directory whose own name contains a dash
+        (self.root / ("-" + repo.strip("/").replace("/", "-"))).mkdir(parents=True)
+        (self.root / ("-" + repo.strip("/").replace("/", "-")) / "memory").mkdir()
+        self.assertEqual(ab.known_projects(self.root), [("ai-market-place", repo)])
+
+    def test_a_folder_name_that_matches_no_directory_is_ignored(self):
+        (self.root / "-no-such-place-at-all").mkdir(parents=True)
+        self.assertEqual(ab.known_projects(self.root), [])
+
     def test_an_empty_or_missing_root_is_fine(self):
         self.assertEqual(ab.known_projects(self.tmp / "nope"), [])
         (self.root / "-empty").mkdir(parents=True)

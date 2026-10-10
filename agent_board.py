@@ -507,6 +507,26 @@ def match_projects(projects: list[tuple[str, str]], query: str) -> list[tuple[st
     return starts + inside + by_path
 
 
+def _folder_path(folder: Path) -> Optional[str]:
+    """The directory a transcript folder is named after, for folders that hold no transcripts (only memory, say).
+
+    The name replaces every / with -, so it is decoded against the disk: the first reading in which each step is a real directory."""
+    tokens = [t for t in folder.name.split("-") if t]
+
+    def walk(prefix: str, rest: list[str]) -> Optional[str]:
+        if not rest:
+            return prefix
+        for k in range(1, len(rest) + 1):
+            candidate = f"{prefix}/{'-'.join(rest[:k])}"
+            if os.path.isdir(candidate):
+                found = walk(candidate, rest[k:])
+                if found:
+                    return found
+        return None
+
+    return walk("", tokens) if tokens and folder.name.startswith("-") else None
+
+
 def known_projects(root: Path = PROJECTS_DIR) -> list[tuple[str, str]]:
     """(name, path) of every directory Claude Code has been used in on this machine, most recently used first.
 
@@ -518,6 +538,12 @@ def known_projects(root: Path = PROJECTS_DIR) -> list[tuple[str, str]]:
         return []
     for folder in folders:
         hit = _transcript_cwd(folder)
+        if not hit:
+            decoded = _folder_path(folder)
+            try:
+                hit = (folder.stat().st_mtime, decoded) if decoded else None
+            except OSError:
+                hit = None
         if not hit:
             continue
         mtime, cwd = hit
