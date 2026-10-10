@@ -1,6 +1,6 @@
 # Jazi's Agent Board 🦎
 
-[![tests](https://github.com/jazithedev/agent-board/actions/workflows/test.yml/badge.svg)](https://github.com/jazithedev/agent-board/actions/workflows/test.yml)
+[![CI](https://github.com/jazithedev/agent-board/actions/workflows/ci.yml/badge.svg)](https://github.com/jazithedev/agent-board/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A keyboard-driven terminal board for your **Claude Code background sessions**. It does what `claude agents`
@@ -267,7 +267,8 @@ Run **`agent-board --doctor`** first: it checks Python, your terminal, Claude Co
 
 ```sh
 git clone https://github.com/jazithedev/agent-board && cd agent-board
-python3 -m unittest discover        # ~300 tests, about 15 seconds
+python3 -m unittest discover        # ~370 tests, about 20 seconds
+python3 -m pip install ruff && ruff check .
 ./agent_board.py --dump --demo --view review   # print a screen as plain text
 ```
 
@@ -278,8 +279,24 @@ python3 -m unittest discover        # ~300 tests, about 15 seconds
 | `mods/agent-board-limits/` | the companion Claude Code mod |
 | `install.sh` | the installer |
 | `test_*.py` | unit tests; several drive real pseudo-terminals |
+| `.github/` | the pipelines below, Dependabot and the pull-request template |
 
-Issues and pull requests are welcome.
+### Pipelines
+
+Every pull request, and every push to the default branch, runs these on GitHub:
+
+| Check | What it guarantees |
+|---|---|
+| **Lint** | `ruff`: no unused or undefined names, no obvious bug patterns |
+| **Tests** | the whole suite on Python 3.10, 3.11, 3.12 and 3.13; it also scans every published file for e-mail addresses and home-directory paths |
+| **Installer** | `install.sh` passes `shellcheck`, installs into an empty home, updates, runs and uninstalls cleanly |
+| **Packaging** | the wheel builds, `twine check` passes, and the installed `agent-board` command runs |
+| **Manifests** | the plugin and marketplace files agree with each other and with the files they name |
+| **Secret scan** | `gitleaks` over the whole history |
+| **Workflow files** | `actionlint` checks the pipelines themselves |
+| **CodeQL** | GitHub's security analysis, also weekly |
+
+One summary check, **CI passed**, is green only when all of them are, so it is the one to require before merging. Dependabot keeps the actions up to date.
 
 ## License
 

@@ -69,7 +69,9 @@ if command -v git >/dev/null 2>&1; then
     git clone --depth 1 --quiet "$SOURCE" "$SRC_DIR" || die "could not download $SOURCE"
   fi
 else
-  command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || die "Need git, or curl and tar, to download the board."
+  if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+    die "Need git, or curl and tar, to download the board."
+  fi
   tmp="$(mktemp -d)"
   curl -fsSL "https://github.com/$REPO/archive/HEAD.tar.gz" | tar -xz -C "$tmp" --strip-components=1 || die "could not download https://github.com/$REPO"
   rm -rf "$SRC_DIR"
@@ -88,8 +90,9 @@ if [ "$WITH_MOD" = 1 ]; then
   CLAUDE_BIN="${AGENT_BOARD_CLAUDE:-claude}"
   if command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
     say "  adding the limits mod to Claude Code"
-    "$CLAUDE_BIN" plugin marketplace add "$REPO" && "$CLAUDE_BIN" plugin install agent-board-limits@agent-board \
-      || warn "could not install the mod; inside Claude Code run: /plugin install agent-board-limits --marketplace $REPO"
+    if ! "$CLAUDE_BIN" plugin marketplace add "$REPO" || ! "$CLAUDE_BIN" plugin install agent-board-limits@agent-board; then
+      warn "could not install the mod; inside Claude Code run: /plugin install agent-board-limits --marketplace $REPO"
+    fi
   else
     warn "Claude Code (the 'claude' command) was not found, so the limits mod was skipped."
   fi
@@ -98,8 +101,8 @@ fi
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
-    rc="~/.profile"
-    case "${SHELL:-}" in */zsh) rc="~/.zshrc" ;; */bash) rc="~/.bashrc" ;; esac
+    rc="$HOME/.profile"
+    case "${SHELL:-}" in */zsh) rc="$HOME/.zshrc" ;; */bash) rc="$HOME/.bashrc" ;; esac
     say ""
     warn "$BIN_DIR is not on your PATH yet. Add it once, then open a new terminal:"
     say "    echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> $rc"

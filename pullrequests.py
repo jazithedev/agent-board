@@ -289,10 +289,10 @@ def find_skill_script(skill: str, filename: str, cache: Path = PLUGIN_CACHE) -> 
 def _json(run: Runner, cmd: list[str], cwd: Optional[str] = None, timeout: int = 120, lines: bool = False):
     try:
         proc = run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout)
-    except FileNotFoundError:
-        raise FetchError(f"{cmd[0]} is not installed")
+    except FileNotFoundError as exc:
+        raise FetchError(f"{cmd[0]} is not installed") from exc
     except subprocess.SubprocessError as exc:
-        raise FetchError(f"{cmd[0]} did not finish: {exc}")
+        raise FetchError(f"{cmd[0]} did not finish: {exc}") from exc
     if proc.returncode != 0:
         reason = next((l for l in (proc.stderr + "\n" + proc.stdout).splitlines() if l.strip()), "failed")
         raise FetchError(reason.strip()[:160])
@@ -300,8 +300,8 @@ def _json(run: Runner, cmd: list[str], cwd: Optional[str] = None, timeout: int =
         if lines:
             return [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
         return json.loads(proc.stdout)
-    except ValueError:
-        raise FetchError(f"{cmd[0]} returned something unreadable")
+    except ValueError as exc:
+        raise FetchError(f"{cmd[0]} returned something unreadable") from exc
 
 
 def glab(run: Runner, endpoint: str, home: str) -> object:

@@ -453,7 +453,6 @@ class ContextualHelp(unittest.TestCase):
 
     def test_what_the_review_list_promises_actually_happens_there(self):
         b = board("review", review=[review(5), review(6)])
-        keys_pressed = [("down",), ("space",), ("ctrl+a",)]
         b.handle("down")
         b.handle("space")
         self.assertTrue(b.marked)  # space marks
