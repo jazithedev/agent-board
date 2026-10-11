@@ -93,15 +93,16 @@ class StartingThere(unittest.TestCase):
         effect = b.handle("enter")
         self.assertEqual((effect.kind, effect.cwd, effect.prompt), ("dispatch", "/srv/www/web-app", "fix the login"))
 
-    def test_a_mention_in_the_middle_or_the_end_works(self):
+    def test_a_mention_inside_the_sentence_keeps_its_name_and_loses_only_the_at(self):
         b = board()
         type_(b, "fix the login in @mobile-app now")
         effect = b.handle("enter")
-        self.assertEqual((effect.cwd, effect.prompt), ("/srv/www/mobile-app", "fix the login in now"))
+        self.assertEqual((effect.cwd, effect.prompt), ("/srv/www/mobile-app", "fix the login in mobile-app now"))
         b2 = board()
-        type_(b2, "fix the login @mobile-app")
+        type_(b2, "Add this (https://example.com/some-skill) skill to my @mobile-app")
         effect = b2.handle("enter")
-        self.assertEqual((effect.cwd, effect.prompt), ("/srv/www/mobile-app", "fix the login"))
+        self.assertEqual(effect.cwd, "/srv/www/mobile-app")
+        self.assertEqual(effect.prompt, "Add this (https://example.com/some-skill) skill to my mobile-app")
 
     def test_it_is_a_one_off_the_chosen_project_stays(self):
         b = board()

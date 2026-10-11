@@ -1519,13 +1519,18 @@ class Board:
         return True
 
     def resolve_mention(self, text: str) -> tuple[str, Optional[tuple[str, str]]]:
-        """(text without the mention, (name, path)) for the first @word naming a known project; others stay as typed."""
+        """(text to send, (name, path)) for the first @word naming a known project; others stay as typed.
+
+        A mention that opens the prompt is dropped, it only chose the project. Anywhere else it is part of the
+        sentence, so its name stays in the text and only the @ is removed."""
         known = {mention_name(n).lower(): (n, p) for n, p in reversed(self.all_projects())}
         for m in MENTION_RE.finditer(text):
             hit = known.get(m.group(1).lower())
             if hit:
+                if text[: m.start()].strip():  # a word in the sentence ("add it to my @web-app"): the name stays, the @ goes
+                    return text[: m.start()] + m.group(1) + text[m.end() :], hit
                 end = m.end() + (1 if text[m.end() : m.end() + 1] in (" ", "\t") else 0)
-                return text[: m.start()] + text[end:], hit
+                return text[: m.start()] + text[end:], hit  # leading: it only picked the project
         return text, None
 
     def start_target(self) -> tuple[str, str]:
