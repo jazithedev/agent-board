@@ -190,6 +190,14 @@ FAKE = textwrap.dedent(
         sys.stderr.write("Couldn't wake abc \u2014 Workspace not trusted. Run `claude` once there, then retry.\r\n"); sys.exit(1)
     if mode == "okexit":
         sys.stdout.write("bye\r\n"); sys.stdout.flush(); sys.exit(0)
+    if sys.argv[1] == "daemon":  # what `claude attach` starts as its own child when no supervisor is running
+        os.setsid()  # like the real one: its own session, so closing the terminal does not hang it up
+        open(os.environ["FAKE_DAEMON"], "w").write(str(os.getpid())); time.sleep(30); sys.exit(0)
+    if mode == "leave-daemon":
+        import subprocess
+        subprocess.Popen([sys.argv[0], "daemon", "run", "--origin", "transient"])
+        time.sleep(0.25)
+        mode = "leave"
     tty.setraw(0)
     out = sys.stdout
     out.write("\x1b[?1049hFRAME-1 size=%dx%d\r\n" % tuple(os.get_terminal_size()))
@@ -217,11 +225,21 @@ def run_bridge(mode, keys, wait=1.5, size=(40, 100), full=False):
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["FAKE_LOG"] = str(log)
+        os.environ["FAKE_DAEMON"] = str(tmp / "daemon.pid")
         tty.setraw(0)  # the board's terminal is always raw (curses); keys must reach the relay unbuffered
         started = time.time()
         outcome = ab.attach_session(str(fake), mode)
         import json
-        result.write_text(json.dumps({"taken": time.time() - started, "cut": outcome.cut, "returncode": outcome.returncode,
+        daemon_alive = None
+        if (tmp / "daemon.pid").exists():
+            dpid = int((tmp / "daemon.pid").read_text())
+            try:
+                os.kill(dpid, 0)
+                daemon_alive = True
+                os.kill(dpid, 9)  # tidy up: the test only needed to know whether the board spared it
+            except OSError:
+                daemon_alive = False
+        result.write_text(json.dumps({"taken": time.time() - started, "daemon_alive": daemon_alive, "cut": outcome.cut, "returncode": outcome.returncode,
                                       "output": outcome.output, "killed": outcome.killed, "failed": outcome.failed}))
         os._exit(0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
@@ -347,12 +365,58 @@ class Wrapping(unittest.TestCase):
         self.assertIsNone(b.peek)
 
 
+class WhatMayBeKilled(unittest.TestCase):
+    CLAUDE = "/opt/claude/bin/claude"
+
+    def test_the_supervisor_the_host_and_the_session_are_infrastructure(self):
+        for argv in (
+            [self.CLAUDE, "daemon", "run", "--origin", "transient", "--spawned-by", "{}"],
+            [self.CLAUDE, "bg-pty-host", "--bg-pty-host", "/tmp/x.sock", "200", "50", "--", "claude"],
+            [self.CLAUDE, "bg-spare", "--bg-spare", "/tmp/x.sock"],
+            ["/opt/claude/versions/2.1.296", "--resume", "/data/projects/p/s.jsonl"],
+            ["node", "cli.js", "daemon", "run"],
+        ):
+            self.assertTrue(ab.is_session_infrastructure(argv), argv)
+
+    def test_the_attach_client_and_the_agent_view_are_not(self):
+        for argv in ([self.CLAUDE, "attach", "fb25ad8c"], [self.CLAUDE, "agents"], [self.CLAUDE], []):
+            self.assertFalse(ab.is_session_infrastructure(argv), argv)
+
+    def test_only_the_attach_client_and_the_relaunched_view_are_killed(self):
+        argvs = {
+            10: [self.CLAUDE, "attach", "s1"],
+            11: [self.CLAUDE, "daemon", "run", "--origin", "transient"],
+            12: [self.CLAUDE, "bg-pty-host", "--bg-pty-host", "/tmp/a.sock"],
+            13: ["/v/2.1.296", "--resume", "/p/s1.jsonl"],
+            14: [self.CLAUDE, "bg-spare", "--bg-spare", "/tmp/b.sock"],
+            15: [self.CLAUDE, "agents"],
+        }
+        tree = {11: [12, 14, 13], 12: [13], 10: [11, 15]}
+        killed = ab.attach_kill_set([10, 11, 12, 14, 13, 15], argvs.get, lambda p: _below(tree, p))
+        self.assertEqual(sorted(killed), [10, 15])
+
+
+def _below(tree, pid):
+    out, queue = [], [pid]
+    while queue:
+        for child in tree.get(queue.pop(), []):
+            out.append(child)
+            queue.append(child)
+    return out
+
+
 class AttachBridge(unittest.TestCase):
     def test_leaving_the_session_screen_returns_at_once_even_if_the_session_lingers(self):
         out, taken, _ = run_bridge("leave", [b"x"])
         self.assertIsNotNone(taken, "attach_session never returned")
         self.assertLess(taken, 2.0)  # the fake keeps running for 4 s after leaving its screen
         self.assertIn("FRAME-1", out)
+
+    def test_leaving_never_kills_the_supervisor_the_attach_client_started(self):
+        # With no supervisor running, `claude attach` starts one as its own child; the session lives under it.
+        _, taken, _, details = run_bridge("leave-daemon", [b"x"], full=True)
+        self.assertIsNotNone(taken, "attach_session never returned")
+        self.assertTrue(details["daemon_alive"], "the board killed the supervisor, and the session with it")
 
     def test_nothing_the_session_draws_after_leaving_reaches_the_terminal(self):
         out, _, _ = run_bridge("leave", [b"x"])

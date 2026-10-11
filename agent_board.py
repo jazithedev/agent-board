@@ -2933,13 +2933,40 @@ def descendants(pid: int) -> list[int]:
     return found
 
 
-def is_agent_view_argv(argv: list[str]) -> bool:
-    """True for `claude agents …` (or `node cli.js agents …`), the view `claude attach` relaunches on ←."""
+def _cli_args(argv: list[str]) -> list[str]:
+    """The arguments `claude` was given, without the script an interpreter runs (`node cli.js agents` -> ['agents'])."""
     args = argv[1:]
     runner = os.path.basename(argv[0]) if argv else ""
     if args and (runner.startswith(("node", "bun", "deno", "python")) or args[0].endswith((".js", ".mjs"))):
         args = args[1:]  # the first argument is the script the interpreter runs
+    return args
+
+
+def is_agent_view_argv(argv: list[str]) -> bool:
+    """True for `claude agents …` (or `node cli.js agents …`), the view `claude attach` relaunches on ←."""
+    args = _cli_args(argv)
     return bool(args) and args[0] == "agents"
+
+
+def is_session_infrastructure(argv: list[str]) -> bool:
+    """True for what `claude attach` may have started on the session's behalf, and which must outlive it: the
+    supervisor (`claude daemon run`, started as the attach client's child when none was running), the process
+    hosting the session (`bg-pty-host`, `bg-spare`) and the session itself (`--resume`)."""
+    args = _cli_args(argv)
+    return bool(args) and (args[0] in ("daemon", "bg-pty-host", "--bg-pty-host", "bg-spare", "--bg-spare") or "--resume" in args)
+
+
+def attach_kill_set(pids: list[int], argv_of: Optional[Callable[[int], list[str]]] = None, tree: Optional[Callable[[int], list[int]]] = None) -> list[int]:
+    """What the board may kill when you leave a session: the attach client and the relaunched agent view, never
+    the supervisor or the session beneath it. Killing those made the session look like "process gone while
+    supervisor was down", and it stopped working the moment you went back to the board."""
+    argv_of, tree = argv_of or read_argv, tree or descendants
+    keep: set[int] = set()
+    for p in pids:
+        if is_session_infrastructure(argv_of(p)):
+            keep.add(p)
+            keep.update(tree(p))
+    return [p for p in pids if p not in keep]
 
 
 def read_argv(pid: int) -> list[str]:
@@ -3074,6 +3101,8 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> AttachRe
     sys.stdout.flush()
     try:
         while True:
+            if killed and proc.poll() is not None:
+                break  # the client is gone; whatever it left running on purpose may still hold the terminal open
             if resized:
                 resized.clear()
                 _copy_winsize(master)
@@ -3107,7 +3136,7 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> AttachRe
                 relaunched = any(is_agent_view_argv(read_argv(p)) or has_relaunch_marker(p) for p in pids)
                 if relaunched or screen.left or _is_stopped(proc.pid):
                     cut, muted, killed = cut or relaunched, True, True
-                    for p in reversed(pids):
+                    for p in reversed(attach_kill_set(pids)):
                         try:
                             os.kill(p, signal.SIGKILL)
                         except OSError:
