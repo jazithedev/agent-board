@@ -237,5 +237,81 @@ class StartingASession(unittest.TestCase):
             finish(b, cli)
 
 
+def ranked(*names):
+    """Finished sessions, newest first, so the list reads in the order given."""
+    return [ab.Session(id=f"id{n}", name=n, state="done", project="p", project_path="/srv/www/p", updated_at=NOW - 60 * i, started_at=NOW - 60 * i) for i, n in enumerate(names)]
+
+
+class AfterDeleting(unittest.TestCase):
+    def setUp(self):
+        self.b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/srv/www/p", now=lambda: NOW)
+        self.all = ranked("a", "b", "c", "d")
+        self.b.set_sessions(list(self.all))
+
+    def delete(self, name, left, release=True):
+        cli = SlowCli()
+        with patched(cli, left):
+            ab.start_session_action(self.b, ab.Effect("remove", session_id=f"id{name}"))
+            if release:
+                finish(self.b, cli)
+
+    def test_the_next_row_is_highlighted_once_the_session_is_gone(self):
+        self.b.sel = "idb"
+        self.delete("b", [s for s in self.all if s.name != "b"])
+        self.assertEqual(self.b.sel, "idc")
+
+    def test_the_last_row_hands_the_highlight_to_the_one_before(self):
+        self.b.sel = "idd"
+        self.delete("d", self.all[:3])
+        self.assertEqual(self.b.sel, "idc")
+
+    def test_the_only_session_leaves_nothing_highlighted(self):
+        self.b.set_sessions(ranked("a"))
+        self.b.sel = "ida"
+        self.delete("a", [])
+        self.assertIsNone(self.b.sel)
+
+    def test_the_highlight_stays_on_the_deleted_row_until_it_vanishes(self):
+        self.b.sel = "idb"
+        self.delete("b", [s for s in self.all if s.name != "b"], release=False)
+        self.assertEqual(self.b.sel, "idb")  # the row shows "removing…" meanwhile
+        finish(self.b, SlowCli())
+
+    def test_moving_elsewhere_while_it_deletes_is_respected(self):
+        self.b.sel = "idb"
+        cli = SlowCli()
+        with patched(cli, [s for s in self.all if s.name != "b"]):
+            ab.start_session_action(self.b, ab.Effect("remove", session_id="idb"))
+            self.b.sel = "idd"
+            finish(self.b, cli)
+        self.assertEqual(self.b.sel, "idd")
+
+    def test_deleting_two_in_a_row_never_lands_on_the_one_going_away(self):
+        self.b.sel = "idb"
+        cli = SlowCli()
+        with patched(cli, [self.all[0], self.all[3]]):
+            ab.start_session_action(self.b, ab.Effect("remove", session_id="idb"))
+            self.b.sel = "idc"
+            ab.start_session_action(self.b, ab.Effect("remove", session_id="idc"))
+            finish(self.b, cli)
+        self.assertEqual(self.b.sel, "idd")
+
+    def test_stopping_keeps_the_highlight_where_it_is(self):
+        self.b.sel = "idb"
+        cli = SlowCli()
+        with patched(cli, list(self.all)):
+            ab.start_session_action(self.b, ab.Effect("stop", session_id="idb"))
+            finish(self.b, cli)
+        self.assertEqual(self.b.sel, "idb")
+
+    def test_a_failed_delete_leaves_the_highlight_on_the_session(self):
+        self.b.sel = "idb"
+        cli = SlowCli(returncode=1, stderr="refused")
+        with patched(cli, list(self.all)):
+            ab.start_session_action(self.b, ab.Effect("remove", session_id="idb"))
+            finish(self.b, cli)
+        self.assertEqual(self.b.sel, "idb")
+
+
 if __name__ == "__main__":
     unittest.main()

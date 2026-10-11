@@ -1093,10 +1093,22 @@ class Board:
         self.known: list[tuple[str, str]] = []
         self.known_at = -1e12
         self.mention_state: dict = {"query": None, "idx": 0}
+        self.successors: dict[str, Optional[str]] = {}  # session being deleted -> the row to highlight once it is gone
         self.placeholders: list[Session] = []  # rows for sessions still being started, until the real ones show up
         self.placeholder_seq = 0
 
     # ── data ──
+    def choose_successor(self, sid: str) -> Optional[str]:
+        """The row that follows `sid` in the list (else the one before it), skipping rows that are going away too."""
+        ids = [s.id for s in self.flat()]
+        if sid not in ids:
+            return None
+        i = ids.index(sid)
+        for other in ids[i + 1 :] + ids[:i][::-1]:
+            if other not in self.busy and other not in self.successors:
+                return other
+        return None
+
     def start_placeholder(self, prompt: str, cwd: str) -> str:
         """Puts a "starting…" row on the list at once, selected, so the prompt feels answered while `claude --bg` runs."""
         self.placeholder_seq += 1
@@ -1119,8 +1131,12 @@ class Board:
 
     def set_sessions(self, sessions: list[Session]) -> None:
         self.sessions = sessions + self.placeholders
-        if self.sel and self.sel not in {s.id for s in sessions}:
-            self.sel = None
+        ids = {s.id for s in self.sessions}
+        if self.sel and self.sel not in ids:
+            heir = self.successors.get(self.sel)  # a deleted session hands the highlight to the row after it
+            self.sel = heir if heir in ids else None
+        for gone in [sid for sid in self.successors if sid not in ids]:
+            del self.successors[gone]
         if self.select_when_seen:
             wanted, asked_at = self.select_when_seen
             new = next((s for s in sessions if s.id == wanted), None)
@@ -3599,6 +3615,8 @@ def run_session_action(board: Board, effect: Effect) -> None:
 
 def start_session_action(board: Board, effect: Effect) -> threading.Thread:
     """Runs a stop or delete in the background so the board keeps drawing; the row shows what is going on."""
+    if effect.kind == "remove":
+        board.successors[effect.session_id] = board.choose_successor(effect.session_id)
     board.busy[effect.session_id] = ACTION_LABEL[effect.kind]
     board.msg = f"{ACTION_LABEL[effect.kind]}"
 
