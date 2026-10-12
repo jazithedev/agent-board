@@ -12,7 +12,7 @@ survive while you look at other sessions).
 Pure Python standard library: nothing to `pip install`, no accounts, no network calls of its own.
 
 ```
- 🦎 Jazi's Agent Board  by status  demo data               1 awaiting input · 3 working · 4 completed
+ 🦎 Jazi's Agent Board    Sessions   Review queue   My PRs   demo data   1 awaiting · 3 working · 4 completed
  ⇣ 3 to review    ⚑ 2 of yours need you (1 conflict · 1 changes · 1 CI failing)    ✓ 1 ready to merge───
 
   Awaiting input  1
@@ -121,7 +121,7 @@ Developed and tested on Linux (X11). CI runs the tests on Python 3.10 to 3.13. m
 **Sessions**, grouped as *Awaiting input*, *Working*, *Idle* and *Completed*. A session whose process has finished
 its turn is shown as **Idle**, even when Claude Code's own state still says "working".
 
-- **Projects**: every session shows its project (worktrees fold into their repository); `ctrl+s` switches to a by-project view.
+- **Projects**: every session shows its project (worktrees fold into their repository); `ctrl+b` groups the list by project instead of by status, and the board remembers your choice.
 - **Tags**: `Code Review`, `Ticket: ABC-123` and `PR #42` are recognised from a session's text. Add your own from a picker (`ctrl+g`): create, rename and delete tags, and new sessions get suggested tags from your first prompt (editable rules).
 - **Rename, pin, stop, delete, peek** at a session's recent output, all from the keyboard.
 - **Start a session** by typing in the prompt at the bottom: choose its **project** (`ctrl+p`) and its **model** (`ctrl+e`). The project list holds every directory you have used Claude Code in, not only those with sessions; `ctrl+t` in it pins a project (any `/path` you type can be pinned too). Typing `@` in the prompt lists the same projects like `/` lists commands: `tab` completes `@name` and the session starts in that project. A mention that opens the prompt only picks the project and is not sent; inside a sentence ("add this skill to my @web-app") the name stays in the text.
@@ -130,10 +130,10 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, and a half-written prompt survives while you open other sessions. The caret moves with `←` `→`, a click, `ctrl+←` / `ctrl+→` (by word) and `home` / `end`; `delete`, `ctrl+w` and `alt+backspace` edit around it.
 - **Mouse**: click opens a session; dragging highlights text live and copies it.
 
-**Pull requests** (optional). Two more views, reached with `ctrl+s`, for the projects that have sessions on the board:
+**Pull requests** (optional). Two more tabs in the title row, **Review queue** and **My PRs**, for the projects that have sessions on the board. `alt+←` / `alt+→` move between tabs, `ctrl+s` cycles them, and a click on a tab opens it:
 
 ```
- 🦎 Jazi's Agent Board  review queue  demo data            1 awaiting input · 3 working · 4 completed
+ 🦎 Jazi's Agent Board    Sessions   Review queue   My PRs   demo data   1 awaiting · 3 working · 4 completed
  ⇣ 3 to review    ⚑ 2 of yours need you (1 conflict · 1 changes · 1 CI failing)    ✓ 1 ready to merge───
 
   ● billing-api  2   github · acme/billing-api
@@ -215,6 +215,8 @@ sudo apt install wl-clipboard   # Wayland
 
 | Key | Does |
 |---|---|
+| `alt+←` `alt+→` · click a tab | switch between the Sessions, Review queue and My PRs tabs |
+| `ctrl+b` | group the sessions by status or by project |
 | `↑` `↓` · click | select a session · open it |
 | `home` `end` | jump to the first / last session (in the prompt they move the caret) |
 | `enter` `→` | open the selected session |

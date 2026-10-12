@@ -46,13 +46,82 @@ def keys(b, *names):
 
 
 class Views(unittest.TestCase):
-    def test_ctrl_s_cycles_all_four_views_and_wraps(self):
+    def test_ctrl_s_cycles_the_three_tabs_and_wraps(self):
         b = board("status")
         seen = []
-        for _ in range(5):
+        for _ in range(4):
             b.handle("ctrl+s")
             seen.append(b.mode)
-        self.assertEqual(seen, ["project", "review", "mine", "status", "project"])
+        self.assertEqual(seen, ["review", "mine", "status", "review"])
+
+
+class Tabs(unittest.TestCase):
+    """Sessions, Review queue and My PRs are tabs in the title row; status or project is how the Sessions tab groups."""
+
+    def title(self, b, width=140):
+        return ab.compose(b, width, 30)[0][1]
+
+    def test_the_title_row_shows_the_tabs_with_the_current_one_marked(self):
+        b = board("status")
+        row = self.title(b)
+        for label in ("Sessions", "Review queue", "My PRs"):
+            self.assertIn(label, ab.plain(row))
+        self.assertEqual([t for t, style in row.segs if style == "tab_on"], [" Sessions "])
+        b.mode = "mine"
+        self.assertEqual([t for t, style in self.title(b).segs if style == "tab_on"], [" My PRs "])
+
+    def test_alt_arrows_move_between_tabs_and_stop_at_the_ends(self):
+        b = board("status")
+        keys(b, "alt+right")
+        self.assertEqual(b.mode, "review")
+        keys(b, "alt+right", "alt+right")
+        self.assertEqual(b.mode, "mine")
+        keys(b, "alt+left", "alt+left", "alt+left")
+        self.assertEqual(b.mode, "status")
+
+    def test_alt_arrows_switch_tabs_from_the_prompt_too(self):
+        b = board("status")
+        b.handle("paste", "two words")
+        keys(b, "alt+right")
+        self.assertEqual(b.mode, "review")
+        self.assertEqual(b.input, "two words")
+
+    def test_ctrl_b_switches_the_grouping_and_it_is_remembered(self):
+        b = board("status")
+        keys(b, "ctrl+b")
+        self.assertEqual(b.mode, "project")
+        keys(b, "alt+right", "alt+left")
+        self.assertEqual(b.mode, "project")  # the Sessions tab comes back grouped as you left it
+        again = ab.Board(b.meta, "/srv/www/scum-map", now=lambda: NOW)
+        self.assertEqual(again.mode, "project")
+        keys(b, "ctrl+b")
+        self.assertEqual(b.mode, "status")
+
+    def test_ctrl_b_does_nothing_on_a_pull_request_tab(self):
+        b = board("review", review=[review(5)])
+        keys(b, "ctrl+b")
+        self.assertEqual(b.mode, "review")
+
+    def test_the_grouping_is_named_beside_the_first_group(self):
+        b = board("status")
+        text = "\n".join(ab.plain(l) for l in ab.compose(b, 120, 30)[0])
+        self.assertIn("grouped by status", text)
+        self.assertNotIn("by status  ", ab.plain(self.title(b, 120)))
+        b.mode = "project"
+        self.assertIn("grouped by project", "\n".join(ab.plain(l) for l in ab.compose(b, 120, 30)[0]))
+
+    def test_a_click_on_a_tab_opens_it(self):
+        b = board("status")
+        row = ab.plain(self.title(b))
+        b.click(1, row.index("My PRs") + 1)
+        self.assertEqual(b.mode, "mine")
+        b.click(1, row.index("Sessions") + 1)
+        self.assertEqual(b.mode, "status")
+
+    def test_esc_on_a_pull_request_tab_returns_to_sessions_grouped_as_before(self):
+        b = board("status")
+        keys(b, "ctrl+b", "alt+right", "esc")
+        self.assertEqual(b.mode, "project")
 
     def test_esc_unwinds_marks_then_search_then_returns_to_the_status_view(self):
         b = board(review=[review(5), review(6)])

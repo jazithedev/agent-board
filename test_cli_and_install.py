@@ -211,7 +211,7 @@ class Installer(unittest.TestCase):
     def test_the_installed_command_runs_the_board_demo(self):
         self.install()
         shown = subprocess.run([str(self.launcher), "--dump", "--demo", "--view", "review"], env=self.env, capture_output=True, text=True)
-        self.assertIn("review queue", shown.stdout)
+        self.assertIn("Review queue", shown.stdout)
 
     def test_the_end_of_the_install_runs_the_doctor_and_survives_its_problems(self):
         done = self.install()

@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -278,6 +278,8 @@ DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading eac
 VIEW_ORDER = ("status", "project", "review", "mine")
 PR_VIEWS = ("review", "mine")
 VIEW_LABEL = {"status": "by status", "project": "by project", "review": "review queue", "mine": "my pull requests"}
+TABS = (("sessions", "Sessions"), ("review", "Review queue"), ("mine", "My PRs"))  # the title row's tabs; Sessions is grouped by status or project
+GROUPINGS = ("status", "project")
 MINE_GROUPS = [("attention", "Needs attention"), ("ready", "Ready to merge"), ("waiting", "Waiting")]
 DEFAULT_LIBRARY = ["Bug", "Feature", "Docs", "Plan", "Tests", "Code Review", "Pull Request", "Urgent", "Blocked"]
 DEFAULT_RULES = [
@@ -978,7 +980,8 @@ class Effect:
 
 
 HELP_COMMON_END = [
-    ("ctrl+s", "next view: status → project → review queue → my PRs"),
+    ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
+    ("ctrl+s", "next tab, round and round"),
     ("ctrl+l", "refresh pull requests now"),
     ("ctrl+o", "settings: PR refresh interval, review teams, review command"),
 ]
@@ -1005,6 +1008,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("ctrl+p", "choose the project a new session starts in: every project you have used Claude Code in is listed; ctrl+t inside pins one"),
         ("ctrl+e", "choose the model new sessions use (alias or any model id)"),
         ("ctrl+f", "find a session"),
+        ("ctrl+b", "group the sessions by status or by project (remembered)"),
         *HELP_COMMON_END,
         ("ctrl+c", "clear the typed prompt, or close a popup; never quits"),
         ("esc", "leave the list, then clear the prompt or search, then quit"),
@@ -1074,7 +1078,7 @@ class Board:
         self.now = now
         self.sessions: list[Session] = []
         self.launch_cwd = launch_cwd
-        self.mode = "status"  # status | project | review | mine
+        self.mode = self.grouping  # status | project (the Sessions tab, grouped that way) | review | mine
         self.input = ""
         self.prompt_hit: Optional[tuple[int, int, list[tuple[int, int]]]] = None  # (row, first column, [(column, index)]) of the drawn prompt, for clicks
         self.pastes: dict[int, str] = {}  # the full text behind each [Pasted text #N] chip in the prompt
@@ -1093,6 +1097,7 @@ class Board:
         self.tagpicker: Optional[dict] = None  # {'sid', 'text', 'idx', 'rename': old label|None, 'delete': label|None}
         self.pending: list[dict] = []  # new sessions whose suggested tags wait for the session to show up
         self.hit: dict[int, str] = {}  # screen row -> session id, filled by compose
+        self.tab_hit: list[tuple[int, int, int, str]] = []  # (row, first column, end column, tab) of each drawn tab
         self.tick = 0
         self.usage: Optional[UsageSummary] = None
         self.limits: Optional[Limits] = None
@@ -1662,8 +1667,34 @@ class Board:
     def selected_pr(self):
         return next((p for p in self.pr_flat() if p.key == self.pr_sel), None)
 
+    @property
+    def grouping(self) -> str:
+        """How the Sessions tab groups its sessions: "status" or "project", remembered between runs."""
+        value = self.meta.settings.get("grouping")
+        return value if value in GROUPINGS else "status"
+
+    @property
+    def tab(self) -> str:
+        return self.mode if self.mode in PR_VIEWS else "sessions"
+
+    def set_tab(self, tab: str) -> None:
+        self.mode = self.grouping if tab == "sessions" else tab
+        self.scroll = 0
+
+    def move_tab(self, delta: int) -> None:
+        """alt+← / alt+→: the tab beside this one; stops at the first and the last."""
+        names = [t for t, _ in TABS]
+        self.set_tab(names[max(0, min(len(names) - 1, names.index(self.tab) + delta))])
+
     def cycle_view(self) -> None:
-        self.mode = VIEW_ORDER[(VIEW_ORDER.index(self.mode) + 1) % len(VIEW_ORDER)]
+        names = [t for t, _ in TABS]
+        self.set_tab(names[(names.index(self.tab) + 1) % len(names)])
+
+    def toggle_grouping(self) -> None:
+        if self.mode in PR_VIEWS:
+            return
+        self.meta.set_setting("grouping", "project" if self.grouping == "status" else None)
+        self.mode = self.grouping
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
@@ -1749,7 +1780,7 @@ class Board:
             elif self.query:
                 self.query = ""
             else:
-                self.mode = "status"
+                self.set_tab("sessions")
         elif key == "up":
             self._move_pr(-1)
         elif key == "down":
@@ -1812,7 +1843,11 @@ class Board:
         return Effect("browse", url=pr.url)
 
     def click(self, y: int, x: int = -1) -> None:
-        """A click on a row selects it and opens it, like Enter would; a click in the prompt moves its caret."""
+        """A click on a row selects it and opens it, like Enter would; a click in the prompt moves its caret, one on a tab opens it."""
+        tab = next((t for ty, x0, x1, t in self.tab_hit if y == ty and x0 <= x < x1), None)
+        if tab:
+            self.set_tab(tab)
+            return
         owner = self.hit.get(y)
         if not owner:
             if x >= 0:
@@ -2052,6 +2087,12 @@ class Board:
     def _handle_main(self, key: str, ch: str) -> Optional[Effect]:
         if key == "ctrl+s":
             self.cycle_view()
+            return None
+        if key in ("alt+left", "alt+right"):  # in the prompt too: ctrl+← / ctrl+→ still move the caret by word
+            self.move_tab(-1 if key == "alt+left" else 1)
+            return None
+        if key == "ctrl+b":
+            self.toggle_grouping()
             return None
         if self.mode in PR_VIEWS:
             return self._handle_pr_view(key, ch)
@@ -2401,10 +2442,22 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     inner = max(20, width - RIGHT_MARGIN)  # right-aligned content stops short of the terminal edge
     counts = board.counts()
     summary = f"{counts['awaiting']} awaiting input · {counts['working']} working · " + (f"{counts['idle']} idle · " if counts["idle"] else "") + f"{counts['done']} completed"
-    mode = VIEW_LABEL[board.mode]
-    left = [(f" {APP_MARK} ", "accent"), (APP_NAME, "bold"), (f"  {mode}", "faint")]
+    brand: list[Seg] = [(f" {APP_MARK} ", "accent"), (APP_NAME, "bold"), ("   ", "normal")]
+    tabs: list[Seg] = []
+    for i, (tab, label) in enumerate(TABS):
+        tabs += ([(" ", "normal")] if i else []) + [(f" {label} ", "tab_on" if tab == board.tab else "tab")]
     if demo:
-        left.append(("  demo data", "wait"))
+        tabs.append(("  demo data", "wait"))
+    if seg_width(brand) + seg_width(tabs) > inner:
+        brand = [(f" {APP_MARK} ", "accent")]  # a narrow screen keeps the tabs and drops the name
+    if seg_width(brand) + seg_width(tabs) + 1 + cell_width(summary) > inner:
+        summary = ""
+    board.tab_hit, col = [], seg_width(brand)
+    for text, style in tabs:
+        if style in ("tab", "tab_on"):
+            board.tab_hit.append((1, col, col + cell_width(text), next(t for t, l in TABS if f" {l} " == text)))
+        col += cell_width(text)
+    left = brand + tabs
     gap = max(1, inner - seg_width(left) - cell_width(summary))
     lines.append(Line([]))  # breathing room above the title
     lines.append(Line(left + [(" " * gap, "normal"), (summary, "dim")]))
@@ -2424,7 +2477,13 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         if gi:
             body.append(Line([]))
             owners.append(None)
-        body.append(group_header(title, subtitle, len(items), inner))
+        header = group_header(title, subtitle, len(items), inner)
+        if gi == 0:  # the grouping is named once, beside the first group: ctrl+b switches it
+            note = f"grouped by {board.mode} · ctrl+b"
+            room = inner - seg_width(header.segs) - cell_width(note)
+            if room >= 2:
+                header = Line(header.segs + [(" " * room, "normal"), (note, "faint")])
+        body.append(header)
         owners.append(None)
         for s in items:
             selected = s.id == board.sel
@@ -3277,7 +3336,7 @@ def _theme() -> dict[str, tuple[int, int, int]]:
         "normal": (-1, -1, d), "bold": (-1, -1, b), "dim": (246, -1, d), "faint": (241, -1, d), "strip": (252, -1, d),
         "strip_bold": (255, -1, b),
         "rule": (238, -1, d), "accent": (209, -1, b), "head": (252, -1, b), "key": (215, -1, b),
-        "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b),
+        "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b), "tab_on": (231, 24, b), "tab": (246, -1, d),
         "work": (215, -1, b), "wait": (221, -1, b), "done": (108, -1, d), "fail": (203, -1, b), "warn": (221, -1, b),
         "tag_review": (16, 183, d), "tag_ticket": (16, 117, d), "tag_pr": (16, 151, d), "tag_custom": (252, 238, d),
     }
@@ -3353,7 +3412,7 @@ KEYS = {
     curses.KEY_HOME: "home", curses.KEY_END: "end", curses.KEY_DC: "delete", 23: "ctrl+w",
     curses.KEY_BACKSPACE: "backspace", 127: "backspace", 8: "backspace",
     13: "enter", curses.KEY_ENTER: "enter", 10: "ctrl+j", 22: "ctrl+v", 25: "ctrl+y", 5: "ctrl+e", 9: "tab",
-    18: "ctrl+r", 20: "ctrl+t", 24: "ctrl+x", 19: "ctrl+s", 6: "ctrl+f", 16: "ctrl+p", 7: "ctrl+g", 21: "ctrl+u", 3: "ctrl+c", 1: "ctrl+a", 12: "ctrl+l", 15: "ctrl+o",
+    18: "ctrl+r", 20: "ctrl+t", 24: "ctrl+x", 19: "ctrl+s", 6: "ctrl+f", 16: "ctrl+p", 7: "ctrl+g", 2: "ctrl+b", 21: "ctrl+u", 3: "ctrl+c", 1: "ctrl+a", 12: "ctrl+l", 15: "ctrl+o",
 }
 
 

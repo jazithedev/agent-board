@@ -232,9 +232,9 @@ class Interaction(unittest.TestCase):
         self.assertIsNone(self.b.sel)
         self.assertEqual(self.b.handle("esc"), ab.Effect("quit"))
 
-    def test_ctrl_s_switches_to_project_view_with_one_group_per_project(self):
+    def test_ctrl_b_groups_by_project_with_one_group_per_project(self):
         self.b.sessions.append(make(4, project="other"))
-        self.b.handle("ctrl+s")
+        self.b.handle("ctrl+b")
         self.assertEqual(sorted(g[0] for g in self.b.groups()), ["other", "scum-map"])
 
     def test_question_mark_opens_help_only_with_empty_input(self):
@@ -388,7 +388,7 @@ class RenameInTheList(unittest.TestCase):
 
     def test_it_works_in_the_by_project_view_too(self):
         self.b.handle("esc")
-        self.b.handle("ctrl+s")
+        self.b.handle("ctrl+b")
         self.b.handle("ctrl+r")
         lines, caret = self.screen()
         self.assertEqual(caret[0], self.row_of(lines, "beta"))
