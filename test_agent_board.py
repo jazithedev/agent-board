@@ -1370,3 +1370,37 @@ class TagsAreKept(unittest.TestCase):
         b.meta._save = lambda: saves.append(1)
         b.set_sessions([make(1, auto_tags=ab.derive_tags("BI-1"))])
         self.assertEqual(saves, [])
+
+
+class DecisionRecords(unittest.TestCase):
+    """Architecture Decision Records (BE-0012, ADR-0020) and product Decision Records (DR#1, RM DR#1) are tagged as such, not as tickets."""
+
+    def labels(self, *src):
+        return [t.label for t in ab.derive_tags(*src)]
+
+    def test_a_zero_padded_key_is_an_adr_not_a_ticket(self):
+        self.assertEqual(self.labels("then wrote BE-0012 and BE-0013 for BI-5008"), ["Ticket: BI-5008", "ADR: BE-0012", "ADR: BE-0013"])
+
+    def test_adr_numbers_are_adrs(self):
+        self.assertEqual(self.labels("see ADR-0020 and ADR-001"), ["ADR: ADR-0020", "ADR: ADR-001"])
+
+    def test_decision_records_in_their_usual_spellings(self):
+        self.assertEqual(self.labels("per DR #1, option 2"), ["DR: #1"])
+        self.assertEqual(self.labels("RM DR#1 settled this"), ["DR: RM#1"])
+        self.assertEqual(self.labels("as DR: LRT#2 says"), ["DR: LRT#2"])
+
+    def test_other_hash_numbers_are_not_decision_records(self):
+        self.assertEqual(self.labels("AC#3 and PR#2 of the stack"), ["PR #2"])
+
+    def test_they_get_their_own_colours(self):
+        self.assertEqual(ab.tag_style(ab.Tag("ADR: BE-0012", "adr")), "tag_adr")
+        self.assertIn("tag_adr", ab._theme())
+        self.assertIn("tag_dr", ab._theme())
+
+    def test_tickets_remembered_before_this_change_become_adrs(self):
+        tmp = tempfile.mkdtemp()
+        first = board([make(1)], tmp)
+        first.meta.sessions["id1"] = {"seen": [["Ticket: BE-0012", "ticket"], ["Ticket: BI-5008", "ticket"]]}
+        first.meta._save()
+        again = board([make(1, auto_tags=[])], tmp)
+        self.assertEqual([t.label for t in again.tags_of(again.sessions[0])], ["Ticket: BI-5008", "ADR: BE-0012"])

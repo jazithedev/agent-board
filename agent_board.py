@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -74,8 +74,32 @@ class Tag:
     kind: str  # review | ticket | pr | custom
 
 
-TAG_LIMITS = {"review": 1, "ticket": 2, "pr": 2}
-TAG_ORDER = {"review": 0, "ticket": 1, "pr": 2}
+TAG_LIMITS = {"review": 1, "ticket": 2, "adr": 2, "dr": 2, "pr": 2}
+TAG_ORDER = {"review": 0, "ticket": 1, "adr": 2, "dr": 3, "pr": 4}
+ADR_RE = re.compile(r"\b(ADR-\d{3,6})\b")  # padded, as ADR series are: ADR-001, ADR-0020
+# a product Decision Record: DR #1, DR#1, "RM DR#1" (RM's first) or "DR: LRT#2"
+DR_RE = re.compile(r"(?:\b([A-Z]{2,5})\s+)?\bDR(?::\s*|\s*)([A-Z]{2,5})?\s?#(\d+)\b")
+TAG_PREFIX = {"Ticket: ": "ticket", "ADR: ": "adr", "DR: ": "dr", "PR #": "pr"}
+
+
+def is_adr_key(key: str) -> bool:
+    """BE-0012 is an Architecture Decision Record: Jira never pads its numbers with zeros, ADR series do."""
+    number = key.rsplit("-", 1)[-1]
+    return len(number) >= 3 and number.startswith("0")
+
+
+def tag_kind(label: str) -> str:
+    """The kind of a tag from its label, as the board writes them."""
+    if label == "Code Review":
+        return "review"
+    return next((kind for prefix, kind in TAG_PREFIX.items() if label.startswith(prefix)), "custom")
+
+
+def remembered_tag(label: str, kind: str) -> Tag:
+    """A tag saved in the metadata; one saved as a ticket before ADRs were told apart comes back as an ADR."""
+    if kind == "ticket" and is_adr_key(label.removeprefix("Ticket: ")):
+        return Tag(f"ADR: {label.removeprefix('Ticket: ')}", "adr")
+    return Tag(label, kind)
 
 
 def merge_tags(kept: list[Tag], found: list[Tag]) -> list[Tag]:
@@ -94,15 +118,28 @@ def derive_tags(*sources: str) -> list[Tag]:
     tags: list[Tag] = []
     if REVIEW_RE.search(text):
         tags.append(Tag("Code Review", "review"))
-    seen: set[str] = set()
+    tickets: list[str] = []
+    adrs: list[tuple[int, str]] = [(m.start(), m.group(1)) for m in ADR_RE.finditer(text)]
     for m in TICKET_RE.finditer(text):
         key = m.group(1)
-        if key.split("-")[0] in NOT_A_TICKET or key in seen:
+        if key.split("-")[0] in NOT_A_TICKET or key in tickets:
             continue
-        seen.add(key)
-        tags.append(Tag(f"Ticket: {key}", "ticket"))
-        if len(seen) == 2:
-            break
+        if is_adr_key(key):
+            adrs.append((m.start(), key))
+        elif len(tickets) < 2:
+            tickets.append(key)
+    tags.extend(Tag(f"Ticket: {k}", "ticket") for k in tickets)
+    adr_keys: list[str] = []
+    for _, key in sorted(adrs):
+        if key not in adr_keys and len(adr_keys) < 2:
+            adr_keys.append(key)
+    tags.extend(Tag(f"ADR: {k}", "adr") for k in adr_keys)
+    drs: list[str] = []
+    for m in DR_RE.finditer(text):
+        label = f"{m.group(1) or m.group(2) or ''}#{m.group(3)}"
+        if label not in drs and len(drs) < 2:
+            drs.append(label)
+    tags.extend(Tag(f"DR: {d}", "dr") for d in drs)
     prs: list[str] = []
     for m in PR_RE.finditer(text):
         number = next(g for g in m.groups() if g)
@@ -1231,7 +1268,7 @@ class Board:
         changed = False
         for s in sessions:
             entry = self.meta.sessions.get(s.id, {})
-            seen = [Tag(str(label), str(kind)) for label, kind in entry.get("seen", []) if kind in TAG_LIMITS]
+            seen = [remembered_tag(str(label), str(kind)) for label, kind in entry.get("seen", []) if kind in TAG_LIMITS]
             s.auto_tags = merge_tags(seen, s.auto_tags)
             labels = [[t.label, t.kind] for t in s.auto_tags]
             if labels and labels != entry.get("seen"):
@@ -2932,7 +2969,7 @@ def _hint_segs(board: Board) -> list[Seg]:
         if previews:
             segs: list[Seg] = [(" ", "normal"), (f"enter start in {board.start_target()[0]} on {model_label(board.model())} · will tag ", "faint")]
             for label in previews:
-                kind = "review" if label == "Code Review" else "ticket" if label.startswith("Ticket:") else "pr" if label.startswith("PR #") else "custom"
+                kind = tag_kind(label)
                 segs += [(f" {label} ", tag_style(Tag(label, kind))), (" ", "normal")]
             return segs + [("· backspace removes a pasted block" if board.pastes else "· ctrl+x cut", "faint")]
         hint = f"enter start in {board.start_target()[0]} on {model_label(board.model())} · ctrl+x cut to clipboard · ctrl+y copy · ctrl+c clears · esc"
@@ -3429,6 +3466,7 @@ def _theme() -> dict[str, tuple[int, int, int]]:
         "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b), "tab_on": (231, 24, b), "tab": (246, -1, d),
         "work": (215, -1, b), "wait": (221, -1, b), "done": (108, -1, d), "fail": (203, -1, b), "warn": (221, -1, b),
         "tag_review": (16, 183, d), "tag_ticket": (16, 117, d), "tag_pr": (16, 151, d), "tag_custom": (252, 238, d),
+        "tag_adr": (16, 180, d), "tag_dr": (16, 224, d),
     }
     for i, c in enumerate([75, 176, 114, 215, 141, 80]):
         t[f"proj{i}"] = (c, -1, b)
