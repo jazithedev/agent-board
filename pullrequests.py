@@ -380,6 +380,23 @@ def fetch_gitlab(remotes: dict[str, Remote], settings: dict, run: Runner, errors
     return mine, review
 
 
+def approve(pr: ReviewPr, run: Runner = subprocess.run) -> Optional[str]:
+    """Approves a pull request (gh) or merge request (glab) as you; None when it worked, else the reason it did not."""
+    if pr.provider == "gitlab":
+        cmd = ["glab", "mr", "approve", str(pr.number), "--repo", f"https://{GITLAB_HOST}/{pr.repo}"]
+    else:
+        cmd = ["gh", "pr", "review", str(pr.number), "--repo", pr.repo, "--approve"]
+    try:
+        proc = run(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        return f"{cmd[0]} is not installed"
+    except subprocess.SubprocessError as exc:
+        return f"{cmd[0]} did not finish: {exc}"
+    if proc.returncode == 0:
+        return None
+    return next((l.strip() for l in (proc.stderr + "\n" + proc.stdout).splitlines() if l.strip()), "failed")[:200]
+
+
 def fetch_all(
     projects: dict[str, Remote], settings: dict, run: Runner, now: float, cache: Path = PLUGIN_CACHE, home: str = str(Path.home())
 ) -> PrData:

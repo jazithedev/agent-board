@@ -164,7 +164,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
  space mark · ctrl+a all · r review · enter open · o browser · ctrl+l refresh · ctrl+o settings · ct…
 ```
 
-- **Review queue**: what is waiting for your review. `space` marks PRs, `r` starts **one review session per project** for the marked ones.
+- **Review queue**: what is waiting for your review. `space` marks PRs, `r` starts **one review session per project** for the marked ones. `a` approves the highlighted PR on GitHub (`gh`) or GitLab (`glab`) after one confirming key (`a` or `enter`); once approved it leaves the queue.
 - **My pull requests**: yours, sorted by what needs you: conflicts, changes requested, failing checks, unresolved threads, or *ready to merge*. Stacked PRs stay nested.
 - A one-line strip under the title keeps the counts visible in every view. Refresh is every 15 minutes by default; change it (or set it to manual) in settings (`ctrl+o`), or press `ctrl+l`.
 - GitHub uses `gh`; GitLab uses `glab`. Everything is **read-only**.

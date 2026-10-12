@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1020,6 +1020,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("space", "mark / unmark the pull request, then move on"),
         ("ctrl+a", "mark or unmark every pull request in the view"),
         ("r", "review the marked PRs (or the current one): one session per project"),
+        ("a", "approve the pull request on GitHub / GitLab (asks first: a or enter); approved, it leaves the queue"),
         ("enter / click", "jump to a session already on that PR (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
         ("ctrl+f", "filter pull requests"),
@@ -1111,6 +1112,8 @@ class Board:
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
+        self.pr_busy_keys: dict[str, str] = {}  # pull request key -> "approving…" while that runs in the background
+        self.approved: set[str] = set()  # pull requests approved from the board: kept out of the queue even if a refresh still lists them
         self.slash_catalog = slash.Catalog()
         self.slash_state: dict = {"query": None, "idx": 0}
         self.workers: list[threading.Thread] = []
@@ -1627,6 +1630,10 @@ class Board:
                 groups.append((title, "", order_stack(items)))
         return groups
 
+    def without_approved(self, data: "prs.PrData") -> "prs.PrData":
+        data.review = [p for p in data.review if p.key not in self.approved]
+        return data
+
     def pr_flat(self) -> list:
         return [p for _, _, items in self.pr_groups() for p, _ in items]
 
@@ -1795,6 +1802,11 @@ class Board:
         elif key == "ctrl+a" and self.mode == "review":
             keys = {x.key for x in self.pr_flat()}
             self.marked = set() if keys and keys <= self.marked else keys
+        elif key == "char" and ch == "a" and self.mode == "review" and p:
+            if p.key in self.pr_busy_keys:
+                self.msg = f"#{p.number} is {self.pr_busy_keys[p.key]}"
+            else:
+                self.confirm = {"kind": "approve", "pr": p.key}
         elif key == "char" and ch == "r" and self.mode == "review":
             chosen = [x for x in self.pr_flat() if x.key in self.marked] or ([p] if p else [])
             if chosen:
@@ -2044,6 +2056,12 @@ class Board:
 
     def _handle_confirm(self, key: str, ch: str) -> Optional[Effect]:
         c, self.confirm = self.confirm, None
+        if c["kind"] == "approve":
+            pr = next((x for x in self.pr_flat() if x.key == c["pr"]), None)
+            if pr and (key == "enter" or (key == "char" and ch.lower() == "a")):
+                return Effect("approve", items=[pr])
+            self.msg = "cancelled"
+            return None
         if is_confirmation(key, ch):
             return Effect(c["kind"], session_id=c["sid"])
         self.msg = "cancelled"
@@ -2291,6 +2309,8 @@ def pr_row(board: Board, pr, depth: int, width: int, selected: bool) -> Line:
     if linked:
         right.append((f"  ⟳{len(linked)}" if len(linked) > 1 else "  ⟳", "accent"))
     chips: list[list[Seg]] = [[(f" {f} ", PR_FLAG_STYLE.get(f, "chip_info"))] for f in flags]
+    if pr.key in board.pr_busy_keys:
+        chips.insert(0, [(f" {board.pr_busy_keys[pr.key]} ", "chip_warn")])
     ref = pr_ref(pr)
     base = lead + [(ref, "accent"), ("  ", "normal")]
     title = pr.title
@@ -2795,6 +2815,11 @@ def _clip(segs: list[Seg], width: int) -> list[Seg]:
 
 
 def _hint_segs(board: Board) -> list[Seg]:
+    if board.confirm and board.confirm["kind"] == "approve":
+        pr = next((x for x in board.pr_flat() if x.key == board.confirm["pr"]), None)
+        where = "GitLab" if pr and pr.provider == "gitlab" else "GitHub"
+        what = f"Approve #{pr.number} “{pr.title}” on {where}?" if pr else "Approve?"
+        return [(" ", "normal"), (what, "warn"), ("  a or enter approves · any other key cancels", "faint")]
     if board.confirm:
         s = next((x for x in board.sessions if x.id == board.confirm["sid"]), None)
         verb = "Stop" if board.confirm["kind"] == "stop" else "Delete"
@@ -2823,7 +2848,7 @@ def _hint_segs(board: Board) -> list[Seg]:
             else "↑/↓ move · enter toggle · type to filter or create · ctrl+r rename · ctrl+x delete · esc done"
         )
     elif board.mode == "review":
-        hint = "space mark · ctrl+a all · r review · enter open · o browser · ctrl+l refresh · ctrl+o settings · ctrl+s next view · esc back"
+        hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+l refresh · ctrl+o settings · esc back"
     elif board.mode == "mine":
         hint = "enter open · o browser · ctrl+l refresh · ctrl+o settings · ctrl+s next view · esc back"
     elif board.sel:
@@ -3656,7 +3681,7 @@ class PrLoader(threading.Thread):
         board = self.board
         board.pr_busy = True
         try:
-            board.prs = prs.fetch_all(self.projects(), dict(board.meta.settings), self.run_, time.time())
+            board.prs = board.without_approved(prs.fetch_all(self.projects(), dict(board.meta.settings), self.run_, time.time()))
             outcome = self.outcome(board)
         except Exception as exc:  # keep the board alive and say what went wrong
             board.prs = prs.PrData(errors=[f"refresh failed: {exc}"], fetched_at=time.time())
@@ -3756,6 +3781,39 @@ def run_session_action(board: Board, effect: Effect) -> None:
     board.set_sessions(load_sessions())
 
 
+def run_approval(board: Board, pr, run=subprocess.run) -> None:
+    """Approves the PR (blocking: this is the slow part); once it worked the PR leaves the review queue."""
+    reason = prs.approve(pr, run)
+    if reason:
+        board.msg = f"✗ could not approve #{pr.number}: {reason}"
+        return
+    flat = [p.key for p in board.pr_flat()]
+    if board.pr_sel == pr.key:  # the selection moves on to the next PR, as after a delete
+        rest = [k for k in flat if k != pr.key]
+        i = flat.index(pr.key) if pr.key in flat else 0
+        board.pr_sel = rest[min(i, len(rest) - 1)] if rest else None
+    board.approved.add(pr.key)
+    board.marked.discard(pr.key)
+    if board.prs:
+        board.without_approved(board.prs)
+    board.msg = f"✓ approved #{pr.number} “{pr.title}”"
+
+
+def start_approval(board: Board, pr) -> threading.Thread:
+    """Runs the approval in the background so the board keeps drawing; the row says what is going on."""
+    board.pr_busy_keys[pr.key] = "approving…"
+
+    def work() -> None:
+        try:
+            run_approval(board, pr)
+        finally:
+            board.pr_busy_keys.pop(pr.key, None)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    return t
+
+
 def start_session_action(board: Board, effect: Effect) -> threading.Thread:
     """Runs a stop or delete in the background so the board keeps drawing; the row shows what is going on."""
     if effect.kind == "remove":
@@ -3837,6 +3895,9 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         return True
     if effect.kind == "review":
         start_review_sessions(board, effect.items)
+        return True
+    if effect.kind == "approve":
+        start_approval(board, effect.items[0])
         return True
     if effect.kind == "attach":
         curses.def_prog_mode()  # remember the board's terminal settings

@@ -246,3 +246,37 @@ class Fetching(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Approving(unittest.TestCase):
+    def run_with(self, returncode=0, stderr=""):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+
+        return seen, run
+
+    def test_a_github_pr_is_approved_with_gh(self):
+        seen, run = self.run_with()
+        p = pr.ReviewPr("github", "acme/billing-api", 482, "Refactor", "https://github.com/acme/billing-api/pull/482")
+        self.assertIsNone(pr.approve(p, run))
+        self.assertEqual(seen, [["gh", "pr", "review", "482", "--repo", "acme/billing-api", "--approve"]])
+
+    def test_a_gitlab_mr_is_approved_with_glab(self):
+        seen, run = self.run_with()
+        p = pr.ReviewPr("gitlab", "scum-map/scum-map", 341, "Map", "https://gitlab.com/scum-map/scum-map/-/merge_requests/341")
+        self.assertIsNone(pr.approve(p, run))
+        self.assertEqual(seen, [["glab", "mr", "approve", "341", "--repo", f"https://{pr.GITLAB_HOST}/scum-map/scum-map"]])
+
+    def test_a_refusal_comes_back_as_its_first_line(self):
+        _, run = self.run_with(1, "failed to create review: Can not approve your own pull request\nmore")
+        p = pr.ReviewPr("github", "acme/billing-api", 482, "Refactor", "u")
+        self.assertEqual(pr.approve(p, run), "failed to create review: Can not approve your own pull request")
+
+    def test_a_missing_cli_is_reported_not_raised(self):
+        def run(cmd, **kw):
+            raise FileNotFoundError(cmd[0])
+
+        self.assertEqual(pr.approve(pr.ReviewPr("github", "a/b", 1, "t", "u"), run), "gh is not installed")

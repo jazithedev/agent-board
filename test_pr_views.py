@@ -1,4 +1,5 @@
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 
@@ -562,3 +563,61 @@ class Layout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Approve(unittest.TestCase):
+    """`a` in the review queue approves the PR on GitHub / GitLab after one confirming key, then it leaves the queue."""
+
+    def setUp(self):
+        self.b = board("review", review=[review(5), review(6), review(7)])
+        self.first = self.b.pr_flat()[0]
+        self.b.pr_sel = self.first.key
+
+    def test_a_asks_first_and_a_again_approves(self):
+        self.assertIsNone(self.b.handle("char", "a"))
+        self.assertEqual(self.b.confirm["kind"], "approve")
+        hint = ab.plain(ab.compose(self.b, 140, 30)[0][-1])
+        self.assertIn(f"Approve #{self.first.number}", hint)
+        self.assertEqual(self.b.handle("char", "a"), ab.Effect("approve", items=[self.first]))
+
+    def test_enter_confirms_too_and_any_other_key_cancels(self):
+        self.b.handle("char", "a")
+        self.assertEqual(self.b.handle("enter"), ab.Effect("approve", items=[self.first]))
+        self.b.handle("char", "a")
+        self.assertIsNone(self.b.handle("esc"))
+        self.assertIsNone(self.b.confirm)
+        self.assertEqual(self.b.msg, "cancelled")
+
+    def test_my_prs_tab_has_no_approve(self):
+        b = board("mine", mine=[mine(1)])
+        b.handle("char", "a")
+        self.assertIsNone(b.confirm)
+
+    def test_an_approved_pr_leaves_the_queue_and_the_next_one_is_selected(self):
+        self.b.marked = {self.first.key}
+        ok = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+        ab.run_approval(self.b, self.first, ok)
+        self.assertNotIn(self.first.key, [p.key for p in self.b.pr_flat()])
+        self.assertNotIn(self.first.key, self.b.marked)
+        self.assertEqual(self.b.pr_sel, self.b.pr_flat()[0].key)
+        self.assertTrue(self.b.msg.startswith(f"✓ approved #{self.first.number}"))
+        self.assertEqual(self.b.pr_counts()["review"], 2)
+
+    def test_a_refresh_that_still_lists_it_does_not_bring_it_back(self):
+        ok = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+        ab.run_approval(self.b, self.first, ok)
+        stale = prs.PrData(review=[review(5), review(6), review(7)], repos=REPOS, fetched_at=NOW)
+        self.assertNotIn(self.first.key, [p.key for p in self.b.without_approved(stale).review])
+
+    def test_a_failed_approval_keeps_the_pr_and_says_why(self):
+        no = lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="", stderr="GraphQL: Review cannot be requested from pull request author.")
+        ab.run_approval(self.b, self.first, no)
+        self.assertIn(self.first.key, [p.key for p in self.b.pr_flat()])
+        self.assertEqual(self.b.msg, f"✗ could not approve #{self.first.number}: GraphQL: Review cannot be requested from pull request author.")
+
+    def test_the_row_says_it_is_being_approved(self):
+        self.b.pr_busy_keys[self.first.key] = "approving…"
+        row = next(l for l in ab.compose(self.b, 140, 30)[0] if f"#{self.first.number}" in ab.plain(l))
+        self.assertIn("approving…", ab.plain(row))
+        self.b.handle("char", "a")
+        self.assertIsNone(self.b.confirm)  # not twice
