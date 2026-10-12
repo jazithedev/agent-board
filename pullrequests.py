@@ -1,8 +1,8 @@
 """Pull requests for agent-board: what you still have to review, and where your own PRs stand.
 
-GitHub goes through `gh` and, where it exists, the `pull-request` plugin's own read-only scripts
-(my_prs_list.py / to_review_list.py), so stacks, re-requests and team scoping behave as they do in
-/pull-request:my-prs-list and /pull-request:to-review-list. GitLab goes through `glab api`.
+GitHub goes through `gh`: your own PRs through the `pull-request` plugin's read-only my_prs_list.py, so
+stacks and review states match /pull-request:my-prs-list, and the review queue through one search for PRs
+that request your review. GitLab goes through `glab api`.
 Every call is read-only. All process access goes through one injectable `run`.
 """
 from __future__ import annotations
@@ -148,7 +148,7 @@ class ReviewPr:
     draft: bool = False
     created_at: float = 0.0
     updated_at: float = 0.0
-    flags: tuple[str, ...] = ()  # new | re-requested | teammate-approved | changes-requested | stale
+    flags: tuple[str, ...] = ()  # new
 
     @property
     def key(self) -> str:
@@ -206,19 +206,6 @@ def github_review_from_search(items: list[dict], include_drafts: bool) -> list[R
             title=i.get("title", ""), url=i.get("html_url", ""), author=(i.get("user") or {}).get("login", "") if isinstance(i.get("user"), dict) else str(i.get("user") or ""),
             draft=bool(i.get("draft")), created_at=parse_time(i.get("created_at")), updated_at=parse_time(i.get("updated_at")),
             flags=("new",),
-        ))
-    return out
-
-
-def github_review_from_script(payload: dict, repo: str) -> list[ReviewPr]:
-    """From to_review_list.py --json."""
-    out = []
-    for p in payload.get("prs", []):
-        flags = tuple(f for f in p.get("flags", []) if f != "draft") or ("new",)
-        out.append(ReviewPr(
-            provider="github", repo=repo, number=int(p["number"]), title=p.get("title", ""), url=p.get("url", ""),
-            author=p.get("author", ""), draft="draft" in p.get("flags", []), created_at=parse_time(p.get("created_at")),
-            updated_at=parse_time(p.get("created_at")), flags=flags,
         ))
     return out
 
@@ -329,24 +316,6 @@ def fetch_github(remotes: dict[str, Remote], settings: dict, run: Runner, cache:
         review = [p for p in github_review_from_search(items, include_drafts) if p.repo.lower() in scope]
     except FetchError as exc:
         errors.append(f"GitHub (review queue): {exc}")
-    teams = {org.lower(): cfg for org, cfg in (settings.get("review_teams") or {}).items()}
-    review_script = find_skill_script("to-review-list", "to_review_list.py", cache)
-    for remote in remotes.values():
-        cfg = teams.get(remote.org.lower()) if remote.provider == "github" else None
-        if not cfg or not cfg.get("include") or review_script is None:
-            continue
-        cmd = ["python3", str(review_script), "--repo", remote.repo, "--json"]
-        for slug in cfg["include"]:
-            cmd += ["--team", slug]
-        for slug in cfg.get("exclude", []):
-            cmd += ["--exclude-team", slug]
-        if include_drafts:
-            cmd.append("--include-drafts")
-        try:
-            richer = github_review_from_script(_json(run, cmd, timeout=240), remote.repo)
-            review = [p for p in review if p.repo.lower() != remote.repo.lower()] + richer
-        except FetchError as exc:
-            errors.append(f"GitHub (team review for {remote.repo}): {exc}")
     return mine, review
 
 

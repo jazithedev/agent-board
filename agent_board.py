@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.7.2"
+__version__ = "0.8.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1070,7 +1070,7 @@ HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
     ("ctrl+s", "next tab, round and round"),
     ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+o", "settings: PR refresh interval, review teams, review command"),
+    ("ctrl+o", "settings: PR refresh interval, drafts, review command"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1809,9 +1809,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        fields = [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
-        orgs = sorted({k.split(":", 1)[1].split("/", 1)[0] for k in (self.prs.repos if self.prs else {}) if k.startswith("github:")})
-        return fields + [(f"teams:{org}", f"Review teams · {org}") for org in orgs]
+        return [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -1819,10 +1817,6 @@ class Board:
             return s.get("review_command", DEFAULT_REVIEW_COMMAND)
         if name == "review_cmd_gl":
             return s.get("review_command_gitlab", DEFAULT_REVIEW_COMMAND_GITLAB)
-        if name.startswith("teams:"):
-            cfg = (s.get("review_teams") or {}).get(name.split(":", 1)[1], {})
-            text = ", ".join(cfg.get("include", []))
-            return text + (f" | {', '.join(cfg['exclude'])}" if cfg.get("exclude") else "")
         return ""
 
     def _commit_setting(self, name: str, text: str) -> None:
@@ -1831,20 +1825,6 @@ class Board:
             self.meta.set_setting("review_command", None if text in ("", DEFAULT_REVIEW_COMMAND) else text)
         elif name == "review_cmd_gl":
             self.meta.set_setting("review_command_gitlab", None if text in ("", DEFAULT_REVIEW_COMMAND_GITLAB) else text)
-        elif name.startswith("teams:"):
-            org = name.split(":", 1)[1]
-            inc, _, exc = text.partition("|")
-
-            def split(t: str) -> list[str]:
-                return [x.strip() for x in t.split(",") if x.strip()]
-
-            teams = dict(self.meta.settings.get("review_teams") or {})
-            if split(inc):
-                teams[org] = {"include": split(inc), "exclude": split(exc)}
-            else:
-                teams.pop(org, None)
-            self.meta.set_setting("review_teams", teams or None)
-            self.refresh_requested.set()
 
     def _handle_settings(self, key: str, ch: str) -> None:
         ui = self.settingsui
@@ -2384,7 +2364,6 @@ def group_header(title: str, subtitle: str, count: int, width: int) -> Line:
 PR_FLAG_STYLE = {
     "conflicts": "chip_bad", "changes requested": "chip_bad", "checks failing": "chip_bad", "unresolved threads": "chip_warn",
     "draft": "chip_info", "nobody asked": "chip_warn", "behind base": "chip_warn", "checks running": "chip_info",
-    "re-requested": "chip_warn", "teammate-approved": "chip_good", "changes-requested": "chip_info", "stale": "chip_info",
 }
 
 
@@ -2556,7 +2535,6 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
             else:
                 shown = [(fit(text, max(10, width - 44)) if text else "not set (enter to add)", "dim" if text else "faint")]
         rows.append([arrow, (f"{label:<24}", "name_sel" if on else "name")] + shown + [(" ", "normal")])
-    rows += [[("", "normal")], [("   teams: include slugs, then | and slugs you are on but want left out", "faint")]]
     _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, "settings"), width)
 
 
@@ -4223,9 +4201,9 @@ def demo_prs(now: float) -> prs.PrData:
                  depth=1, parent=233, created_at=now - 1 * day, updated_at=now - 1 * day, draft=True, merge="clean"),
     ]
     review = [
-        prs.ReviewPr("github", "acme/billing-api", 482, "Refactor checkout totals", "https://github.com/acme/billing-api/pull/482", "maria", created_at=now - 2 * day, flags=("re-requested",)),
+        prs.ReviewPr("github", "acme/billing-api", 482, "Refactor checkout totals", "https://github.com/acme/billing-api/pull/482", "maria", created_at=now - 2 * day),
         prs.ReviewPr("github", "acme/billing-api", 231, "Bump stripe-php to 15.2", "https://github.com/acme/billing-api/pull/231", "dave", created_at=now - 1 * day),
-        prs.ReviewPr("github", "acme/web-app", 479, "Add CSV export to the citations report", "https://github.com/acme/web-app/pull/479", "tom", created_at=now - 5 * day, flags=("teammate-approved",)),
+        prs.ReviewPr("github", "acme/web-app", 479, "Add CSV export to the citations report", "https://github.com/acme/web-app/pull/479", "tom", created_at=now - 5 * day),
     ]
     repos = {"github:acme/billing-api": "/srv/www/billing-api", "github:acme/web-app": "/srv/www/web-app", "gitlab:acme/mobile-app": "/srv/www/mobile-app"}
     return prs.PrData(mine=mine, review=review, errors=[], fetched_at=now - 4 * 60, repos=repos)

@@ -82,12 +82,6 @@ class Normalising(unittest.TestCase):
         both = pr.github_review_from_search(items, include_drafts=True)
         self.assertEqual([(p.number, p.repo, p.author, p.draft) for p in both], [(1, "o/r", "maria", False), (2, "o/r", "tom", True)])
 
-    def test_review_script_flags_survive_and_default_to_new(self):
-        payload = {"prs": [{"number": 3, "title": "c", "url": "u", "author": "a", "created_at": "2026-10-01T00:00:00Z", "flags": ["re-requested", "draft"]},
-                           {"number": 4, "title": "d", "url": "u", "author": "a", "created_at": "2026-10-01T00:00:00Z", "flags": []}]}
-        a, b = pr.github_review_from_script(payload, "o/r")
-        self.assertEqual((a.flags, a.draft, b.flags), (("re-requested",), True, ("new",)))
-
     def test_gitlab_merge_request_mapping(self):
         mr = {"iid": 12, "title": "Fix", "web_url": "https://gitlab.com/g/p/-/merge_requests/12", "source_branch": "fix", "target_branch": "master",
               "draft": False, "references": {"full": "g/p!12"}, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z", "reviewers": [{"username": "maria"}]}
@@ -114,7 +108,7 @@ class Normalising(unittest.TestCase):
             f.parent.mkdir(parents=True)
             f.write_text("")
         self.assertIn("1.10.0", str(pr.find_skill_script("my-prs-list", "my_prs_list.py", root)))
-        self.assertIsNone(pr.find_skill_script("to-review-list", "to_review_list.py", root))
+        self.assertIsNone(pr.find_skill_script("other-skill", "my_prs_list.py", root))
 
 
 class FakeWorld:
@@ -125,7 +119,6 @@ class FakeWorld:
         self.fail = set()
         self.my_prs = {"prs": []}
         self.search = []
-        self.team_prs = {"prs": []}
         self.gl_mine = []
         self.gl_review = []
         self.gl_approvals = {}
@@ -138,8 +131,6 @@ class FakeWorld:
         ok = lambda data: SimpleNamespace(returncode=0, stdout=data if isinstance(data, str) else json.dumps(data), stderr="")
         if key == "my_prs_list.py":
             return ok(self.my_prs)
-        if key == "to_review_list.py":
-            return ok(self.team_prs)
         if key == "gh":
             return ok("\n".join(json.dumps(i) for i in self.search))
         endpoint = cmd[-1]
@@ -156,7 +147,7 @@ class FakeWorld:
 
 def cache_with_scripts():
     root = Path(tempfile.mkdtemp())
-    for skill, name in (("my-prs-list", "my_prs_list.py"), ("to-review-list", "to_review_list.py")):
+    for skill, name in (("my-prs-list", "my_prs_list.py"),):
         f = root / "m" / "pull-request" / "1.2.0" / "skills" / skill / "scripts" / name
         f.parent.mkdir(parents=True)
         f.write_text("")
@@ -199,13 +190,11 @@ class Fetching(unittest.TestCase):
         self.fetch()
         self.assertFalse(any(c[0] in ("gh", "python3") for c in self.world.calls))
 
-    def test_team_config_replaces_the_personal_search_for_that_repo_with_the_script_result(self):
+    def test_the_review_queue_never_runs_the_to_review_list_script(self):
         self.world.search = [search_item("octo/live-chat", 5)]
-        self.world.team_prs = {"prs": [{"number": 9, "title": "team one", "url": "u", "author": "tom", "created_at": "2026-10-03T00:00:00Z", "flags": ["re-requested"]}]}
-        data = self.fetch(review_teams={"Octo": {"include": ["core"], "exclude": ["other"]}})  # org names match regardless of case
-        self.assertEqual([(p.number, p.flags) for p in data.review], [(9, ("re-requested",))])
-        cmd = next(c for c in self.world.calls if c[0] == "python3" and c[1].endswith("to_review_list.py"))
-        self.assertEqual(cmd[2:], ["--repo", "octo/live-chat", "--json", "--team", "core", "--exclude-team", "other"])
+        data = self.fetch(review_teams={"octo": {"include": ["core"], "exclude": ["other"]}})  # left over from older versions: ignored
+        self.assertEqual([p.number for p in data.review], [5])
+        self.assertFalse(any("to_review_list" in " ".join(c) for c in self.world.calls))
 
     def test_drafts_are_hidden_from_the_review_queue_by_default(self):
         self.world.search = [search_item("octo/live-chat", 5, draft=True)]

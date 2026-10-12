@@ -332,23 +332,8 @@ class Settings(unittest.TestCase):
         self.b.handle("enter")
         self.assertNotIn("review_command", self.b.meta.settings)
 
-    def test_team_fields_appear_for_each_github_org_in_scope_and_parse_include_and_exclude(self):
-        names = [n for n, _ in self.b.settings_fields()]
-        self.assertEqual([n for n in names if n.startswith("teams:")], ["teams:acme"])
-        self.b.settingsui["idx"] = names.index("teams:acme")
-        self.b.refresh_requested.clear()
-        self.b.handle("enter")
-        for c in "core, backend | infra":
-            self.b.handle("space" if c == " " else "char", c)
-        self.b.handle("enter")
-        self.assertEqual(self.b.meta.settings["review_teams"], {"acme": {"include": ["core", "backend"], "exclude": ["infra"]}})
-        self.assertTrue(self.b.refresh_requested.is_set())
-        self.assertEqual(self.b.setting_text("teams:acme"), "core, backend | infra")
-
-    def test_clearing_the_teams_removes_them(self):
-        self.b.meta.settings["review_teams"] = {"acme": {"include": ["core"], "exclude": []}}
-        self.b._commit_setting("teams:acme", "")
-        self.assertNotIn("review_teams", self.b.meta.settings)
+    def test_there_are_no_review_team_fields(self):
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "drafts", "review_cmd", "review_cmd_gl"])
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
         self.b.handle("right")
