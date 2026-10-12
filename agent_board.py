@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -48,6 +48,7 @@ META_PATH = Path(
 )
 REFRESH_SECONDS = 2.0
 SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
+WAITING_MARK = "⧗"  # a working session whose turn is over, waiting on a background task it started
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]")
 
 # ───────────────────────────── tags ─────────────────────────────
@@ -124,6 +125,7 @@ class Session:
     updated_at: float = 0.0
     auto_tags: list[Tag] = field(default_factory=list)
     idle: bool = False  # alive and finished its turn, though its last written state still says "working"
+    waiting_on: list[str] = field(default_factory=list)  # background tasks it is waiting on after its turn ended
 
     @property
     def group(self) -> str:
@@ -187,7 +189,8 @@ def build_session(row: dict, state: dict) -> Session:
     branch = str(state.get("worktreeBranch") or "")
     in_flight = state.get("inFlight") if isinstance(state.get("inFlight"), dict) else {}
     still_busy = any(in_flight.get(k) for k in ("tasks", "queued", "drainableMonitors"))
-    idle = (row.get("status") == "idle" or state.get("tempo") == "idle") and not still_busy
+    turn_ended = row.get("status") == "idle" or state.get("tempo") == "idle"
+    idle = turn_ended and not still_busy
     started = float(row.get("startedAt") or 0) / 1000 or parse_iso(state.get("createdAt"))
     updated = parse_iso(state.get("updatedAt")) or started
     return Session(
@@ -206,7 +209,22 @@ def build_session(row: dict, state: dict) -> Session:
         updated_at=updated,
         auto_tags=derive_tags(name, intent, detail, branch),
         idle=idle,
+        waiting_on=background_tasks(state, in_flight) if turn_ended and still_busy else [],
     )
+
+
+TASK_KINDS = {"local_bash": "a shell command", "shell": "a shell command", "monitor": "a monitor"}
+
+
+def background_tasks(state: dict, in_flight: dict) -> list[str]:
+    """What a session whose turn has ended is still waiting on: the labels Claude Code lists under "fan", else the task kinds."""
+    fan = state.get("fan") if isinstance(state.get("fan"), list) else []
+    labels = [" ".join(str(t.get("label") or "").split()) for t in fan if isinstance(t, dict)]
+    labels = [l for l in labels if l]
+    if labels:
+        return labels
+    kinds = [str(k) for k in in_flight.get("kinds") or []]
+    return [TASK_KINDS.get(k, f"a {k.replace('_', ' ')}") for k in kinds] or ["a background task"]
 
 
 def scan_jobs(jobs_dir: Path) -> list[dict]:
@@ -2142,6 +2160,8 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
         "idle": ("dim", "○"),
         "done": ("fail", "✗") if s.state in FAILED else ("done", "●"),
     }[s.group]
+    if s.group == "working" and s.waiting_on:  # its turn is over; only a background task keeps it going, so nothing spins
+        icon_style, icon = "work", WAITING_MARK
     busy = board.busy.get(s.id)
     if busy:  # being stopped or deleted right now: a spinner and a label, so it is clear that something is happening
         icon_style, icon = "wait", SPINNER[board.tick % len(SPINNER)]
@@ -2178,7 +2198,11 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
     branch = [(f"⎇ {s.branch}", "faint")] if s.branch else []
     indent = [("▌" if selected else " ", "accent"), ("    ", "normal")]
     avail = width - seg_width(indent) - (cell_width(branch[0][0]) + 2 if branch else 0) - 1
-    detail = fit(f"{busy} this can take a few seconds" if busy else (s.detail or "—"), max(10, avail))
+    text = s.detail or "—"
+    if s.group == "working" and s.waiting_on:
+        tasks = s.waiting_on
+        text = (f"waiting on {tasks[0]}" if len(tasks) == 1 else f"waiting on {len(tasks)} background tasks: {', '.join(tasks)}") + (f" · {s.detail}" if s.detail else "")
+    detail = fit(f"{busy} this can take a few seconds" if busy else text, max(10, avail))
     second_left = indent + [(detail, "dim")]
     gap = max(1, width - seg_width(second_left) - (cell_width(branch[0][0]) if branch else 0) - 1)
     second = Line(second_left + ([(" " * gap, "normal")] + branch if branch else []), selected)

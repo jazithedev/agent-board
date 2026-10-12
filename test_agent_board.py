@@ -533,6 +533,32 @@ class IdleSessions(unittest.TestCase):
             s = self.build({}, {"inFlight": {"tasks": 0, "queued": 0, "drainableMonitors": 0, key: 1}})
             self.assertEqual(s.group, "working", key)
 
+    def test_a_turn_that_ended_with_a_background_task_running_is_waiting_on_it(self):
+        # what Claude Code writes while a `run_in_background` command is still going after the turn ended
+        state = {"tempo": "idle", "inFlight": {"tasks": 1, "queued": 0, "kinds": ["local_bash"], "drainableMonitors": 0},
+                 "fan": [{"id": "be8w1ny2d", "kind": "shell", "label": "gh pr checks 28957 --watch", "startedAt": 1_790_000_000_000}]}
+        s = self.build({"status": "busy"}, state)
+        self.assertEqual(s.group, "working")
+        self.assertEqual(s.waiting_on, ["gh pr checks 28957 --watch"])
+
+    def test_a_task_without_a_label_is_named_by_its_kind(self):
+        state = {"inFlight": {"tasks": 1, "queued": 0, "kinds": ["local_bash"], "drainableMonitors": 0}}
+        self.assertEqual(self.build({"status": "busy"}, state).waiting_on, ["a shell command"])
+
+    def test_a_session_still_in_its_turn_is_not_waiting_on_anything(self):
+        state = {"tempo": "active", "inFlight": {"tasks": 1, "queued": 0, "kinds": ["local_bash"], "drainableMonitors": 0},
+                 "fan": [{"kind": "shell", "label": "sleep 100"}]}
+        self.assertEqual(self.build({"status": "busy"}, state).waiting_on, [])
+
+    def test_the_row_says_what_it_is_waiting_on_instead_of_spinning(self):
+        b = board([make(1, "working", "sentry issue investigation", detail="waiting on CI for fc42f86", waiting_on=["gh pr checks 28957 --watch"])])
+        first, second = ab.row_lines(b, b.sessions[0], 110, False)
+        self.assertIn(ab.WAITING_MARK, ab.plain(first))
+        self.assertNotIn(ab.SPINNER[b.tick % len(ab.SPINNER)], ab.plain(first))
+        self.assertIn("waiting on gh pr checks 28957 --watch · waiting on CI for fc42f86", ab.plain(second))
+        two = board([make(1, "working", "x", waiting_on=["sleep 100", "npm test"])])
+        self.assertIn("waiting on 2 background tasks: sleep 100, npm test", ab.plain(ab.row_lines(two, two.sessions[0], 110, False)[1]))
+
     def test_finished_and_awaiting_sessions_are_unaffected(self):
         self.assertEqual(self.build({"state": "done"}, {"state": "done"}).group, "done")
         self.assertEqual(self.build({"state": "waiting"}, {"state": "waiting"}).group, "awaiting")
