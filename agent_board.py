@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -2425,9 +2425,14 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         body_h -= len(panels) + 1  # the list's rows, with a blank line between it and the panels
     if sel_range:
         if sel_range[0] < board.scroll:
-            board.scroll = sel_range[0] - (1 if sel_range[0] > 0 and not body[sel_range[0] - 1].segs else 0)
+            top = sel_range[0]
+            while top > 0 and owners[top - 1] is None and sel_range[1] - (top - 1) <= body_h:
+                top -= 1  # bring the group heading, and the gap above it, back with the group's first row
+            board.scroll = top
         if sel_range[1] > board.scroll + body_h:
             board.scroll = sel_range[1] - body_h
+    elif board.mode not in PR_VIEWS and board.sel is None:
+        board.scroll = 0  # back in the prompt: the list returns to its top
     board.scroll = max(0, min(board.scroll, max(0, len(body) - body_h)))
     view = body[board.scroll : board.scroll + body_h]
     inline_caret: Optional[tuple[int, int]] = None

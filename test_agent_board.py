@@ -1180,6 +1180,27 @@ class Rendering(unittest.TestCase):
         lines, _ = ab.compose(b, 100, 14)
         self.assertIn("s29", "\n".join(ab.plain(l) for l in lines))
 
+    def test_scrolling_back_up_to_a_groups_first_session_shows_its_heading(self):
+        b = board([make(i, "waiting", f"w{i}", updated=i) for i in range(3)] + [make(i, "done", f"s{i}", updated=i) for i in range(3, 30)])
+        b.sel = "id29"
+        ab.compose(b, 100, 14)
+        b.sel = "id3"  # the first Completed session
+        text = "\n".join(ab.plain(l) for l in ab.compose(b, 100, 14)[0])
+        self.assertIn("Completed", text)
+        b.sel = "id0"  # the very first session
+        text = "\n".join(ab.plain(l) for l in ab.compose(b, 100, 14)[0])
+        self.assertIn("Awaiting input", text)
+        self.assertEqual(b.scroll, 0)
+
+    def test_returning_to_the_prompt_scrolls_the_list_back_to_the_top(self):
+        b = board([make(i, "waiting", f"w{i}", updated=i) for i in range(3)] + [make(i, "done", f"s{i}", updated=i) for i in range(3, 30)])
+        b.sel = "id29"
+        ab.compose(b, 100, 14)
+        b.sel = None
+        text = "\n".join(ab.plain(l) for l in ab.compose(b, 100, 14)[0])
+        self.assertEqual(b.scroll, 0)
+        self.assertIn("Awaiting input", text)
+
     def test_caret_only_when_input_is_focused(self):
         b = board([make(1)])
         self.assertIsNotNone(ab.compose(b, 100, 20)[1])
