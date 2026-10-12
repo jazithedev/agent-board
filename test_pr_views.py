@@ -319,7 +319,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("include_drafts", self.b.meta.settings)
 
     def test_review_command_can_be_edited_and_reset(self):
-        for _ in range(2):
+        for _ in range(3):
             self.b.handle("down")
         self.b.handle("enter")
         self.b.handle("ctrl+u")
@@ -333,7 +333,8 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "drafts", "review_cmd", "review_cmd_gl"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "drafts", "age", "review_cmd", "review_cmd_gl"])
+
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
         self.b.handle("right")
@@ -350,6 +351,50 @@ class Settings(unittest.TestCase):
         self.b.handle("esc")
         self.assertIsNone(self.b.settingsui)
 
+
+class ReviewQueueAge(unittest.TestCase):
+    """The review queue hides PRs opened longer ago than a setting (ctrl+o), 30 days unless changed."""
+
+    def setUp(self):
+        self.b = board("review", review=[review(2), review(45), review(200)])  # opened that many days ago
+
+    def shown(self):
+        return [p.number for p in self.b.pr_flat()]
+
+    def test_hides_prs_older_than_30_days_by_default(self):
+        self.assertEqual(self.b.review_age_days(), 30)
+        self.assertEqual(self.shown(), [2])
+        self.assertEqual(self.b.pr_counts()["review"], 1)
+        self.assertEqual(self.b.hidden_by_age(), 2)
+
+    def test_the_footer_says_how_many_are_hidden(self):
+        self.assertIn("2 older than 30 days hidden (ctrl+o)", "\n".join(ab.plain(l) for l in ab.compose(self.b, 140, 30)[0]))
+
+    def test_the_setting_cycles_and_zero_shows_every_pr(self):
+        self.b.handle("ctrl+o")
+        for _ in range(2):
+            self.b.handle("down")
+        self.b.handle("right")
+        self.assertEqual((self.b.meta.settings["review_max_age_days"], self.shown()), (60, [45, 2]))
+        for _ in range(4):  # 60 -> 90 -> 180 -> 365 -> 0
+            self.b.handle("right")
+        self.assertEqual((self.b.review_age_days(), self.shown()), (0, [200, 45, 2]))
+        self.b.handle("right")  # wraps to 7
+        self.b.handle("left")
+        self.assertEqual(self.b.review_age_days(), 0)
+
+    def test_the_default_is_not_written_to_the_settings_file(self):
+        self.b.meta.settings["review_max_age_days"] = 14
+        self.b.handle("ctrl+o")
+        for _ in range(2):
+            self.b.handle("down")
+        self.b.handle("right")
+        self.assertNotIn("review_max_age_days", self.b.meta.settings)
+        self.assertEqual(self.b.review_age_days(), 30)
+
+    def test_a_pr_with_no_date_is_kept(self):
+        self.b.prs.review.append(prs.ReviewPr("github", "acme/billing-api", 4, "No date", "u", "maria"))
+        self.assertIn(4, self.shown())
 
 class Loader(unittest.TestCase):
     def test_loader_scopes_to_the_projects_of_sessions_and_reads_their_remotes_once(self):

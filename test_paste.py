@@ -161,8 +161,8 @@ class PasteRouting(unittest.TestCase):
         self.assertEqual(b.tagpicker["text"], "Customer Facing")
         b.handle("esc")
         b.handle("ctrl+o")
-        b.handle("down")
-        b.handle("down")
+        for _ in range(3):  # PR refresh, drafts, review queue age, then the review command
+            b.handle("down")
         b.handle("enter")
         b.handle("ctrl+u")
         b.handle("paste", "/my-review {urls}")

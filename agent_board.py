@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -360,6 +360,8 @@ PASTE_CHIP_MIN_CHARS = 800  # Claude Code collapses a longer paste into a chip: 
 PASTE_CHIP_RE = re.compile(r"\[Pasted text #(\d+)(?: \+(\d+) lines)?\]")
 PR_REFRESH_CHOICES = [0, 5, 10, 15, 30, 60]  # minutes between pull-request refreshes; 0 = only when asked
 DEFAULT_PR_REFRESH = 15
+REVIEW_AGE_CHOICES = [0, 7, 14, 30, 60, 90, 180, 365]  # the review queue hides PRs opened longer ago than this many days; 0 = keep all
+DEFAULT_REVIEW_AGE = 30
 DEFAULT_REVIEW_COMMAND = "/code-review:code-review {urls}"
 DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading each one and its diff with glab: {urls}"
 VIEW_ORDER = ("status", "project", "review", "mine")
@@ -1070,7 +1072,7 @@ HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
     ("ctrl+s", "next tab, round and round"),
     ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+o", "settings: PR refresh interval, drafts, review command"),
+    ("ctrl+o", "settings: PR refresh interval, drafts, review queue age, review command"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1717,7 +1719,7 @@ class Board:
             by_project: dict[str, list] = {}
             for path in self.prs.repos.values():
                 by_project.setdefault(path, [])
-            for p in self.prs.review:
+            for p in self.review_prs():
                 if self._matches_pr(p):
                     by_project.setdefault(self.pr_project(p)[1], []).append(p)
             groups = []
@@ -1733,6 +1735,23 @@ class Board:
             if items:
                 groups.append((title, "", order_stack(items)))
         return groups
+
+    def review_age_days(self) -> int:
+        days = self.meta.settings.get("review_max_age_days", DEFAULT_REVIEW_AGE)
+        return days if days in REVIEW_AGE_CHOICES else DEFAULT_REVIEW_AGE
+
+    def review_prs(self) -> list:
+        """The review queue without PRs opened longer ago than the setting allows (ctrl+o)."""
+        if not self.prs:
+            return []
+        days = self.review_age_days()
+        if not days:
+            return list(self.prs.review)
+        cutoff = self.now() - days * 86400
+        return [p for p in self.prs.review if not p.created_at or p.created_at >= cutoff]
+
+    def hidden_by_age(self) -> int:
+        return len(self.prs.review) - len(self.review_prs()) if self.prs else 0
 
     def without_approved(self, data: "prs.PrData") -> "prs.PrData":
         data.review = [p for p in data.review if p.key not in self.approved]
@@ -1750,7 +1769,7 @@ class Board:
             for r in p.attention:
                 reasons[r] = reasons.get(r, 0) + 1
         return {
-            "review": len(data.review),
+            "review": len(self.review_prs()),
             "attention": sum(1 for p in data.mine if p.group == "attention"),
             "ready": sum(1 for p in data.mine if p.group == "ready"),
             "reasons": reasons,
@@ -1809,7 +1828,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
+        return [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -1859,7 +1878,11 @@ class Board:
         elif name == "drafts" and key in ("enter", "space", "left", "right"):
             self.meta.set_setting("include_drafts", not self.meta.settings.get("include_drafts", False) or None)
             self.refresh_requested.set()
-        elif key == "enter" and name not in ("refresh", "drafts"):
+        elif name == "age" and key in ("left", "right", "enter", "space"):
+            i = REVIEW_AGE_CHOICES.index(self.review_age_days())
+            days = REVIEW_AGE_CHOICES[(i + (-1 if key == "left" else 1)) % len(REVIEW_AGE_CHOICES)]
+            self.meta.set_setting("review_max_age_days", None if days == DEFAULT_REVIEW_AGE else days)
+        elif key == "enter" and name not in ("refresh", "drafts", "age"):
             ui["edit"] = {"field": name, "text": self.setting_text(name)}
         return None
 
@@ -2529,6 +2552,9 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
             shown: list[Seg] = [("◂ ", "faint"), (value, "bold"), (" ▸", "faint")]
         elif name == "drafts":
             shown = [("[x] yes" if s.get("include_drafts") else "[ ] no", "done" if s.get("include_drafts") else "faint")]
+        elif name == "age":
+            days = board.review_age_days()
+            shown = [("◂ ", "faint"), (f"hide PRs older than {days} days" if days else "show every PR", "bold"), (" ▸", "faint")]
         else:
             text = board.setting_text(name)
             if ui["edit"] and ui["edit"]["field"] == name:
@@ -2674,6 +2700,9 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     elif board.mode in PR_VIEWS:
         n = len(board.marked)
         text = f"{n} marked for review" if n else ("space marks a PR for review, r starts a review session" if board.mode == "review" else "enter opens a PR; a ⟳ marks a PR a session is already working on")
+        old = board.hidden_by_age() if board.mode == "review" and not n else 0
+        if old:
+            text += f" · {old} older than {board.review_age_days()} days hidden (ctrl+o)"
         lines.append(Line([(" ", "normal"), ("◆ " if n else "  ", "accent"), (text, "bold" if n else "faint")]))
     else:
         pre = [(" ❯ ", "accent")]
