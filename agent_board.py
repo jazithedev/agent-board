@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -72,6 +72,21 @@ REVIEW_RE = re.compile(
 class Tag:
     label: str
     kind: str  # review | ticket | pr | custom
+
+
+TAG_LIMITS = {"review": 1, "ticket": 2, "pr": 2}
+TAG_ORDER = {"review": 0, "ticket": 1, "pr": 2}
+
+
+def merge_tags(kept: list[Tag], found: list[Tag]) -> list[Tag]:
+    """Tags seen before stay; newly found ones join while there is room (up to two tickets and two PRs)."""
+    out: list[Tag] = []
+    for t in kept + found:
+        if t.kind not in TAG_LIMITS or any(o.label == t.label for o in out):
+            continue
+        if sum(1 for o in out if o.kind == t.kind) < TAG_LIMITS[t.kind]:
+            out.append(t)
+    return sorted(out, key=lambda t: TAG_ORDER[t.kind])
 
 
 def derive_tags(*sources: str) -> list[Tag]:
@@ -177,7 +192,42 @@ def read_state(jobs_dir: Path, job_id: str) -> dict:
         return {}
 
 
-def build_session(row: dict, state: dict) -> Session:
+WORKTREE_MARK = "/.claude/worktrees/"
+
+
+def worktree_folder(path: str) -> str:
+    """The worktree's folder name when the path is inside one (often the ticket: task+BI-5008-…), else ""."""
+    return path.split(WORKTREE_MARK, 1)[1].split("/", 1)[0] if WORKTREE_MARK in path else ""
+
+
+class BranchLookup:
+    """The branch checked out in a session's worktree, asked of git once per folder (and again after a few minutes)."""
+
+    TTL = 300
+
+    def __init__(self, run: Callable = subprocess.run, now: Callable[[], float] = time.time):
+        self.run, self.now = run, now
+        self.cache: dict[str, tuple[str, float]] = {}
+
+    def __call__(self, path: str) -> str:
+        if not worktree_folder(path):
+            return ""  # the main checkout's branch says nothing about one session
+        hit = self.cache.get(path)
+        if hit and self.now() - hit[1] < self.TTL:
+            return hit[0]
+        try:
+            proc = self.run(["git", "-C", path, "branch", "--show-current"], capture_output=True, text=True, timeout=5)
+            branch = proc.stdout.strip() if proc.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            branch = ""
+        self.cache[path] = (branch, self.now())
+        return branch
+
+
+BRANCHES = BranchLookup()
+
+
+def build_session(row: dict, state: dict, live_branch: str = "") -> Session:
     job_id = str(row.get("id") or state.get("daemonShort") or "")
     cwd = str(row.get("cwd") or state.get("cwd") or "")
     origin = str(state.get("originCwd") or "")
@@ -207,7 +257,7 @@ def build_session(row: dict, state: dict) -> Session:
         tokens=int(state.get("tokens") or 0),
         started_at=started,
         updated_at=updated,
-        auto_tags=derive_tags(name, intent, detail, branch),
+        auto_tags=derive_tags(name, intent, detail, branch, worktree_folder(cwd), live_branch),
         idle=idle,
         waiting_on=background_tasks(state, in_flight) if turn_ended and still_busy else [],
     )
@@ -246,7 +296,7 @@ def load_sessions(
             raise ValueError("unexpected output")
     except (OSError, ValueError, subprocess.SubprocessError):
         rows = scan_jobs(jobs_dir)
-    return [build_session(row, read_state(jobs_dir, str(row.get("id", "")))) for row in rows if row.get("id")]
+    return [build_session(row, read_state(jobs_dir, str(row.get("id", ""))), BRANCHES(str(row.get("cwd") or ""))) for row in rows if row.get("id")]
 
 
 # ───────────────────────────── metadata (renames, tags, pins) ─────────────────────────────
@@ -1159,6 +1209,7 @@ class Board:
             self.sel = real_id if real_id and any(x.id == real_id for x in self.sessions) else None
 
     def set_sessions(self, sessions: list[Session]) -> None:
+        self._keep_tags(sessions)
         self.sessions = sessions + self.placeholders
         ids = {s.id for s in self.sessions}
         if self.sel and self.sel not in ids:
@@ -1174,6 +1225,20 @@ class Board:
                     self.sel = wanted
                 self.select_when_seen = None
         self._resolve_pending()
+
+    def _keep_tags(self, sessions: list[Session]) -> None:
+        """A ticket or PR a session once showed stays on it, even after its summary line moves on (remembered in meta)."""
+        changed = False
+        for s in sessions:
+            entry = self.meta.sessions.get(s.id, {})
+            seen = [Tag(str(label), str(kind)) for label, kind in entry.get("seen", []) if kind in TAG_LIMITS]
+            s.auto_tags = merge_tags(seen, s.auto_tags)
+            labels = [[t.label, t.kind] for t in s.auto_tags]
+            if labels and labels != entry.get("seen"):
+                self.meta.sessions[s.id] = {**entry, "seen": labels}
+                changed = True
+        if changed:
+            self.meta._save()
 
     def expect_session(self, prompt: str, cwd: str, tags: list[str]) -> None:
         if tags:

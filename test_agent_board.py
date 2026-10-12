@@ -1310,3 +1310,63 @@ class Rendering(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TagsFromTheLiveWorktree(unittest.TestCase):
+    """A session that moved into a worktree after it started has no worktree recorded; its folder and branch still name the ticket."""
+
+    ROW = {"id": "4c102866", "name": "sentry issue investigation", "state": "working", "status": "busy",
+           "cwd": "/srv/www/tools/.claude/worktrees/task+BI-5008-idempotent-auto-reply-success"}
+    STATE = {"state": "working", "cwd": "/srv/www/tools", "originCwd": "/srv/www/tools", "worktreePath": None,
+             "worktreeBranch": None, "intent": "Analyse this Sentry issue", "detail": "rerunning ECS alone"}
+
+    def test_the_worktree_folder_names_the_ticket(self):
+        s = ab.build_session(self.ROW, self.STATE)
+        self.assertIn("Ticket: BI-5008", [t.label for t in s.auto_tags])
+        self.assertEqual(s.project, "tools")
+
+    def test_the_branch_checked_out_there_counts_too(self):
+        row = dict(self.ROW, cwd="/srv/www/tools/.claude/worktrees/agent-a4af31021f9eab975")
+        s = ab.build_session(row, self.STATE, live_branch="task/BI-5011-aggregate-owns-success-rules")
+        self.assertEqual([t.label for t in s.auto_tags], ["Ticket: BI-5011"])
+
+    def test_the_branch_is_looked_up_only_for_a_worktree_folder_and_only_once(self):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="task/BI-5008-x\n")
+
+        lookup = ab.BranchLookup(run, now=lambda: NOW)
+        self.assertEqual(lookup("/srv/www/tools/.claude/worktrees/w1"), "task/BI-5008-x")
+        self.assertEqual(lookup("/srv/www/tools/.claude/worktrees/w1"), "task/BI-5008-x")
+        self.assertEqual(lookup("/srv/www/tools"), "")  # the main checkout's branch says nothing about one session
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], ["git", "-C", "/srv/www/tools/.claude/worktrees/w1", "branch", "--show-current"])
+
+
+class TagsAreKept(unittest.TestCase):
+    """A ticket or PR a session has shown stays on it, even after its summary line moves on."""
+
+    def test_a_tag_from_an_earlier_summary_stays(self):
+        b = board([make(1, "working", "sentry", auto_tags=ab.derive_tags("PR #28957 conflicts resolved; BI-5010"))])
+        b.set_sessions([make(1, "working", "sentry", auto_tags=ab.derive_tags("rerunning ECS alone"))])
+        self.assertEqual([t.label for t in b.tags_of(b.sessions[0])], ["Ticket: BI-5010", "PR #28957"])
+
+    def test_they_survive_a_restart_of_the_board(self):
+        tmp = tempfile.mkdtemp()
+        b = board([make(1, auto_tags=ab.derive_tags("BI-5010 and PR #28957"))], tmp)
+        again = board([make(1, auto_tags=[])], tmp)
+        self.assertEqual([t.label for t in again.tags_of(again.sessions[0])], ["Ticket: BI-5010", "PR #28957"])
+
+    def test_new_ones_join_up_to_two_of_each_kind_in_order(self):
+        b = board([make(1, auto_tags=ab.derive_tags("Code review of BI-1 PR #10"))])
+        b.set_sessions([make(1, auto_tags=ab.derive_tags("BI-2 BI-3 PR #11 PR #12"))])
+        self.assertEqual([t.label for t in b.tags_of(b.sessions[0])], ["Code Review", "Ticket: BI-1", "Ticket: BI-2", "PR #10", "PR #11"])
+
+    def test_nothing_is_written_when_nothing_new_was_seen(self):
+        b = board([make(1, auto_tags=ab.derive_tags("BI-1"))])
+        saves = []
+        b.meta._save = lambda: saves.append(1)
+        b.set_sessions([make(1, auto_tags=ab.derive_tags("BI-1"))])
+        self.assertEqual(saves, [])
