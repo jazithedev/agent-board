@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1779,7 +1779,7 @@ class Board:
         elif key == "ctrl+o":
             self.settingsui = {"idx": 0, "edit": None}
         elif key == "ctrl+f":
-            self.edit = {"kind": "find", "text": self.query, "sid": ""}
+            self.edit = {"kind": "find", "text": self.query, "sid": "", "cursor": len(self.query)}
         elif key == "char" and ch == "?":
             self.help = True
         elif key == "char" and ch == "r":
@@ -1991,7 +1991,9 @@ class Board:
             if self.tagpicker["rename"] is None:
                 self.tagpicker["idx"] = 0
         elif self.edit:
-            self.edit["text"] += flat
+            e = self.edit
+            c = e.get("cursor", len(e["text"]))
+            e["text"], e["cursor"] = e["text"][:c] + flat + e["text"][c:], c + len(flat)
             if self.edit["kind"] == "find":
                 self.query = self.edit["text"]
         elif self.mode in PR_VIEWS:
@@ -2029,16 +2031,12 @@ class Board:
             self.edit = None
         elif key == "enter":
             self._commit_edit()
-        elif key == "backspace":
-            e["text"] = e["text"][:-1]
-        elif key == "ctrl+u":
-            e["text"] = ""
-        elif key in ("char", "space"):
-            e["text"] += ch or " "
-            if e["kind"] == "find":
-                self.query = e["text"]
-        if e and e["kind"] == "find" and key in ("backspace", "ctrl+u"):
-            self.query = e["text"]
+        else:
+            edited = edit_line(e["text"], e.get("cursor", len(e["text"])), key, ch)
+            if edited:
+                e["text"], e["cursor"] = edited
+                if e["kind"] == "find":
+                    self.query = e["text"]
         return None
 
     def _commit_edit(self) -> None:
@@ -2113,7 +2111,7 @@ class Board:
         elif key in ("ctrl+r", "ctrl+g", "ctrl+t", "ctrl+x") and not s:
             self.msg = "select a session first (↓)"
         elif key == "ctrl+r" and s:
-            self.edit = {"kind": "rename", "text": self.name_of(s), "sid": s.id}
+            self.edit = {"kind": "rename", "text": self.name_of(s), "sid": s.id, "cursor": len(self.name_of(s))}
         elif key == "ctrl+g" and s:
             self.tagpicker = {"sid": s.id, "text": "", "idx": 0, "rename": None, "delete": None}
         elif key == "ctrl+t" and s:
@@ -2125,7 +2123,7 @@ class Board:
         elif key == "ctrl+o":
             self.settingsui = {"idx": 0, "edit": None}
         elif key == "ctrl+f":
-            self.edit = {"kind": "find", "text": self.query, "sid": ""}
+            self.edit = {"kind": "find", "text": self.query, "sid": "", "cursor": len(self.query)}
         elif key == "ctrl+p":
             self.open_picker()
         elif key == "ctrl+e":
@@ -2181,9 +2179,10 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
         return seg_width(prefix) + cell_width(n) + sum(1 + seg_width(c) for c in cs) + 2 + seg_width(right)
 
     if renaming:  # the name is edited right here in the list, so your eyes stay on the row
-        shown = fit_tail(renaming["text"], max(8, width - seg_width(prefix) - 2 - seg_width(right) - 1))
-        left: list[Seg] = prefix + [(shown, "edit")]
-        caret_x = seg_width(prefix) + cell_width(shown)
+        room = max(8, width - seg_width(prefix) - 2 - seg_width(right) - 1)
+        shown, col, _ = prompt_window(renaming["text"], renaming.get("cursor", len(renaming["text"])), room, "edit")
+        left: list[Seg] = prefix + shown
+        caret_x = seg_width(prefix) + col
     else:
         while chips and total(name, chips) > width:
             chips.pop()
@@ -2504,8 +2503,9 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         label = "⌕ find "
         pre = [(" ", "normal"), (label, "accent")]
         text = board.edit["text"]
-        lines.append(Line(pre + [(fit(text, width - seg_width(pre) - 1), "bold")]))
-        caret = (input_y, min(width - 1, seg_width(pre) + cell_width(text)))
+        shown, col, _ = prompt_window(text, board.edit.get("cursor", len(text)), width - seg_width(pre) - 1, "bold")
+        lines.append(Line(pre + shown))
+        caret = (input_y, min(width - 1, seg_width(pre) + col))
     elif board.mode in PR_VIEWS:
         n = len(board.marked)
         text = f"{n} marked for review" if n else ("space marks a PR for review, r starts a review session" if board.mode == "review" else "enter opens a PR; a ⟳ marks a PR a session is already working on")
@@ -2563,6 +2563,54 @@ def prompt_segs(text: str, style: str) -> list[Seg]:
     if pos < len(text):
         segs.append((text[pos:].replace("\n", " ⏎ "), style))
     return segs
+
+
+def edit_line(text: str, cursor: int, key: str, ch: str = "") -> Optional[tuple[str, int]]:
+    """One key in a single-line field (a rename, the find bar): the new (text, caret), or None for a key it does not use.
+
+    The same moves as the prompt: ←/→, home/end, ctrl or alt+←/→ by word, and deleting either side of the caret."""
+    c = max(0, min(cursor, len(text)))
+
+    def word_start(i: int) -> int:
+        while i > 0 and text[i - 1].isspace():
+            i -= 1
+        while i > 0 and not text[i - 1].isspace():
+            i -= 1
+        return i
+
+    def word_end(i: int) -> int:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        while i < len(text) and not text[i].isspace():
+            i += 1
+        return i
+
+    if key == "left":
+        return text, max(0, c - 1)
+    if key == "right":
+        return text, min(len(text), c + 1)
+    if key == "home":
+        return text, 0
+    if key == "end":
+        return text, len(text)
+    if key in ("ctrl+left", "alt+left"):
+        return text, word_start(c)
+    if key in ("ctrl+right", "alt+right"):
+        return text, word_end(c)
+    if key == "backspace":
+        return text[: max(0, c - 1)] + text[c:], max(0, c - 1)
+    if key == "delete":
+        return text[:c] + text[c + 1 :], c
+    if key in ("ctrl+w", "alt+backspace"):
+        return text[: word_start(c)] + text[c:], word_start(c)
+    if key == "ctrl+delete":
+        return text[:c] + text[word_end(c) :], c
+    if key == "ctrl+u":
+        return "", 0
+    if key in ("char", "space"):
+        typed = ch or " "
+        return text[:c] + typed + text[c:], c + len(typed)
+    return None
 
 
 def prompt_tokens(text: str) -> list[tuple[int, int]]:

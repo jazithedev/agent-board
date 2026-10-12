@@ -270,6 +270,49 @@ class RenameInTheList(unittest.TestCase):
         row = ab.plain(lines[y])
         self.assertEqual(caret[1], row.index("beta") + len("beta"))
 
+    def keys(self, *keys):
+        for k in keys:
+            self.b.handle("char", k[5:]) if k.startswith("char:") else self.b.handle(k)
+
+    def test_the_caret_moves_and_typing_goes_in_where_it_is(self):
+        self.keys("left", "left", "char:X")  # be|ta
+        self.assertEqual(self.b.edit["text"], "beXta")
+        self.keys("home", "char:[", "end", "char:]")
+        self.assertEqual(self.b.edit["text"], "[beXta]")
+        self.keys("left", "backspace", "home", "delete")  # removes the a before ] and then the [
+        self.assertEqual(self.b.edit["text"], "beXt]")
+        self.keys("right", "right", "right", "right", "right", "right")  # stops at the end
+        self.assertEqual(self.b.edit["cursor"], len("beXt]"))
+
+    def test_words_are_skipped_and_deleted_with_ctrl_and_alt(self):
+        self.keys("ctrl+u", *[f"char:{c}" for c in "fix the login bug"])
+        self.keys("ctrl+left", "ctrl+left")
+        self.assertEqual(self.b.edit["cursor"], len("fix the "))
+        self.keys("alt+right")
+        self.assertEqual(self.b.edit["cursor"], len("fix the login"))
+        self.keys("ctrl+w")
+        self.assertEqual(self.b.edit["text"], "fix the  bug")
+
+    def test_a_paste_goes_in_at_the_caret(self):
+        self.keys("home", "right", "right")
+        self.b._handle_paste("XY")
+        self.assertEqual(self.b.edit["text"], "beXYta")
+        self.assertEqual(self.b.edit["cursor"], 4)
+
+    def test_the_screen_caret_follows_the_edit_caret(self):
+        self.keys("left", "left")
+        lines, caret = self.screen()
+        y = self.row_of(lines, "beta")
+        self.assertEqual(caret, (y, ab.plain(lines[y]).index("beta") + 2))
+
+    def test_the_find_bar_moves_its_caret_too(self):
+        self.keys("esc")
+        self.b.sel = None
+        self.b.handle("ctrl+f")
+        self.keys("char:b", "char:t", "left", "char:e")
+        self.assertEqual(self.b.edit["text"], "bet")
+        self.assertEqual(self.b.query, "bet")
+
     def test_typing_shows_up_in_the_row_as_you_type_and_the_cursor_follows(self):
         for _ in "beta":
             self.b.handle("backspace")
