@@ -1,8 +1,7 @@
 """Pull requests for agent-board: what you still have to review, and where your own PRs stand.
 
-GitHub goes through `gh`: your own PRs through the `pull-request` plugin's read-only my_prs_list.py, so
-stacks and review states match /pull-request:my-prs-list, and the review queue through one search for PRs
-that request your review. GitLab goes through `glab api`.
+GitHub goes through one `gh api graphql` request per refresh: your open PRs and the PRs that request your
+review, with their review state, merge state and checks. GitLab goes through `glab api`.
 Every call is read-only. All process access goes through one injectable `run`.
 """
 from __future__ import annotations
@@ -10,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +17,6 @@ from typing import Callable, Optional
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
-PLUGIN_CACHE = Path.home() / ".claude" / "plugins" / "cache"
 GITLAB_HOST = "gitlab.com"
 SOURCES = ("github", "gitlab")
 
@@ -148,7 +147,7 @@ class ReviewPr:
     draft: bool = False
     created_at: float = 0.0
     updated_at: float = 0.0
-    flags: tuple[str, ...] = ()  # new
+    flags: tuple[str, ...] = ()  # new | re-requested | teammate-changes-requested | teammate-approved
 
     @property
     def key(self) -> str:
@@ -175,39 +174,82 @@ _MERGE = {"CLEAN": "clean", "HAS_HOOKS": "clean", "DIRTY": "conflict", "BEHIND":
 _CHECKS = {"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail", "PENDING": "pending", "EXPECTED": "pending"}
 
 
-def github_my_prs(payload: dict) -> list[MyPr]:
-    """From my_prs_list.py --json."""
-    out = []
-    for p in payload.get("prs", []):
-        reviews = p.get("reviews") or {}
-        out.append(MyPr(
-            provider="github", repo=p.get("repo", ""), number=int(p["number"]), title=p.get("title", ""), url=p.get("url", ""),
-            base=p.get("base", ""), head=p.get("head", ""), draft=bool(p.get("is_draft")), ticket=p.get("ticket") or "",
-            depth=int(p.get("depth") or 0), parent=p.get("parent"),
-            created_at=parse_time(p.get("created_at")), updated_at=parse_time(p.get("updated_at")),
-            decision=_DECISION.get(p.get("decision") or "", "none"), merge=_MERGE.get(p.get("merge_state") or "", "unknown"),
-            checks=_CHECKS.get(p.get("checks") or "", ""), checks_stale=bool(p.get("checks_stale")),
-            requested=tuple(p.get("requested") or ()), reviewed=bool(reviews),
-        ))
+TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
+REVIEWED = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
+
+
+def _login(actor: object) -> str:
+    return (actor or {}).get("login", "") if isinstance(actor, dict) else ""
+
+
+def _nodes(conn: object) -> list[dict]:
+    return [n for n in ((conn or {}).get("nodes") or []) if isinstance(n, dict)] if isinstance(conn, dict) else []
+
+
+def _requested(node: dict) -> tuple[str, ...]:
+    """Who is still asked to review: people by login, teams by name."""
+    names = []
+    for n in _nodes(node.get("reviewRequests")):
+        who = n.get("requestedReviewer") or {}
+        if who.get("login") or who.get("name"):
+            names.append(who.get("login") or who.get("name"))
+    return tuple(names)
+
+
+def _reviews(node: dict) -> dict[str, str]:
+    """Each person's latest review state; bots (Copilot and the like) are not reviewers."""
+    out = {}
+    for n in _nodes(node.get("latestReviews")):
+        author = n.get("author") or {}
+        login = author.get("login", "")
+        if login and author.get("__typename") != "Bot" and not login.endswith("[bot]"):
+            out[login] = n.get("state", "")
     return out
 
 
-def repo_from_api_url(url: str) -> str:
-    return url.split("/repos/", 1)[1] if "/repos/" in url else ""
+def ticket_of(head: str, title: str) -> str:
+    """The ticket key in the branch name, else in the title."""
+    m = TICKET_RE.search(head.upper()) or TICKET_RE.search(title)
+    return m.group(1) if m else ""
 
 
-def github_review_from_search(items: list[dict], include_drafts: bool) -> list[ReviewPr]:
-    out = []
-    for i in items:
-        if i.get("draft") and not include_drafts:
-            continue
-        out.append(ReviewPr(
-            provider="github", repo=repo_from_api_url(i.get("repository_url", "")), number=int(i["number"]),
-            title=i.get("title", ""), url=i.get("html_url", ""), author=(i.get("user") or {}).get("login", "") if isinstance(i.get("user"), dict) else str(i.get("user") or ""),
-            draft=bool(i.get("draft")), created_at=parse_time(i.get("created_at")), updated_at=parse_time(i.get("updated_at")),
-            flags=("new",),
-        ))
-    return out
+def github_my_pr(node: dict) -> MyPr:
+    commits = _nodes(node.get("commits"))
+    rollup = ((commits[-1].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
+    merge = _MERGE.get(node.get("mergeStateStatus") or "", "unknown")
+    checks = _CHECKS.get(rollup.get("state") or "", "")
+    head, title = node.get("headRefName") or "", node.get("title") or ""
+    return MyPr(
+        provider="github", repo=(node.get("repository") or {}).get("nameWithOwner", ""), number=int(node["number"]), title=title,
+        url=node.get("url", ""), base=node.get("baseRefName") or "", head=head, draft=bool(node.get("isDraft")), ticket=ticket_of(head, title),
+        created_at=parse_time(node.get("createdAt")), updated_at=parse_time(node.get("updatedAt")),
+        decision=_DECISION.get(node.get("reviewDecision") or "", "none"), merge=merge, checks=checks,
+        checks_stale=merge == "conflict" and bool(checks),  # a conflict stops new runs, so the result is an old one
+        requested=_requested(node), reviewed=bool(_reviews(node)),
+    )
+
+
+def review_flags(node: dict, me: str) -> tuple[str, ...]:
+    """re-requested: asked again after you reviewed. teammate-…: someone other than you and the author decided."""
+    author = _login(node.get("author"))
+    reviews = _reviews(node)
+    others = {who: state for who, state in reviews.items() if who not in (me, author)}
+    flags = []
+    if reviews.get(me) in REVIEWED and me in _requested(node):
+        flags.append("re-requested")
+    if "CHANGES_REQUESTED" in others.values():
+        flags.append("teammate-changes-requested")
+    if "APPROVED" in others.values():
+        flags.append("teammate-approved")
+    return tuple(flags) or ("new",)
+
+
+def github_review_pr(node: dict, me: str) -> ReviewPr:
+    return ReviewPr(
+        provider="github", repo=(node.get("repository") or {}).get("nameWithOwner", ""), number=int(node["number"]),
+        title=node.get("title") or "", url=node.get("url", ""), author=_login(node.get("author")), draft=bool(node.get("isDraft")),
+        created_at=parse_time(node.get("createdAt")), updated_at=parse_time(node.get("updatedAt")), flags=review_flags(node, me),
+    )
 
 
 def gitlab_repo_of(mr: dict) -> str:
@@ -264,15 +306,6 @@ def link_stacks(prs: list[MyPr]) -> list[MyPr]:
 # ───────────────────────────── fetching ─────────────────────────────
 
 
-def find_skill_script(skill: str, filename: str, cache: Path = PLUGIN_CACHE) -> Optional[Path]:
-    def version(p: Path) -> tuple[int, ...]:
-        parts = re.findall(r"\d+", p.parts[p.parts.index("pull-request") + 1]) if "pull-request" in p.parts else []
-        return tuple(int(x) for x in parts)
-
-    found = sorted(cache.glob(f"*/pull-request/*/skills/{skill}/scripts/{filename}"), key=version)
-    return found[-1] if found else None
-
-
 def _json(run: Runner, cmd: list[str], cwd: Optional[str] = None, timeout: int = 120, lines: bool = False):
     try:
         proc = run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout)
@@ -295,28 +328,45 @@ def glab(run: Runner, endpoint: str, home: str) -> object:
     return _json(run, ["glab", "api", "--hostname", GITLAB_HOST, endpoint], cwd=home)
 
 
-def fetch_github(remotes: dict[str, Remote], settings: dict, run: Runner, cache: Path, errors: list[str]) -> tuple[list[MyPr], list[ReviewPr]]:
+_PR_FIELDS = "number title url createdAt updatedAt isDraft repository { nameWithOwner } author { login }"
+_PEOPLE = """reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+      latestReviews(first: 20) { nodes { state author { __typename login } } }"""
+GITHUB_QUERY = f"""query {{
+  viewer {{ login }}
+  mine: search(query: "is:pr is:open author:@me archived:false", type: ISSUE, first: 100) {{
+    nodes {{ ... on PullRequest {{ {_PR_FIELDS} baseRefName headRefName reviewDecision mergeStateStatus
+      {_PEOPLE}
+      commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}
+  }}
+  review: search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 100) {{
+    nodes {{ ... on PullRequest {{ {_PR_FIELDS}
+      {_PEOPLE} }} }}
+  }}
+}}"""
+MERGE_TRIES = 3  # GitHub works merge states out lazily: a cold query reports UNKNOWN, the next one the real value
+
+
+def fetch_github(remotes: dict[str, Remote], settings: dict, run: Runner, errors: list[str], sleep: Callable[[float], None] = time.sleep) -> tuple[list[MyPr], list[ReviewPr]]:
+    """Your open PRs and the PRs that request your review, in one request (asked again while merge states are unknown)."""
     scope = {r.repo.lower() for r in remotes.values() if r.provider == "github"}
-    mine: list[MyPr] = []
-    review: list[ReviewPr] = []
     if not scope:
-        return mine, review
-    script = find_skill_script("my-prs-list", "my_prs_list.py", cache)
-    if script is None:
-        errors.append("GitHub: the pull-request plugin was not found, so your own PRs can't be listed")
-    else:
-        try:
-            mine = [p for p in github_my_prs(_json(run, ["python3", str(script), "--json"])) if p.repo.lower() in scope]
-        except FetchError as exc:
-            errors.append(f"GitHub (your PRs): {exc}")
-    include_drafts = bool(settings.get("include_drafts"))
+        return [], []
     try:
-        items = _json(run, ["gh", "api", "--paginate", "-X", "GET", "search/issues", "-f", "q=is:pr is:open archived:false review-requested:@me",
-                            "--jq", ".items[] | {number,title,html_url,repository_url,created_at,updated_at,draft,user:.user.login}"], lines=True)
-        review = [p for p in github_review_from_search(items, include_drafts) if p.repo.lower() in scope]
-    except FetchError as exc:
-        errors.append(f"GitHub (review queue): {exc}")
-    return mine, review
+        for attempt in range(MERGE_TRIES):
+            data = (_json(run, ["gh", "api", "graphql", "-f", f"query={GITHUB_QUERY}"]) or {}).get("data") or {}
+            mine_nodes = [n for n in _nodes(data.get("mine")) if n.get("number")]
+            if attempt == MERGE_TRIES - 1 or not any(n.get("mergeStateStatus") == "UNKNOWN" for n in mine_nodes):
+                break
+            sleep(1.0)
+        me = _login(data.get("viewer"))
+        mine = [github_my_pr(n) for n in mine_nodes]
+        review = [github_review_pr(n, me) for n in _nodes(data.get("review")) if n.get("number")]
+    except (FetchError, AttributeError, KeyError, TypeError, ValueError) as exc:
+        errors.append(f"GitHub (pull requests): {exc}")
+        return [], []
+    include_drafts = bool(settings.get("include_drafts"))
+    return ([p for p in mine if p.repo.lower() in scope],
+            [p for p in review if p.repo.lower() in scope and (include_drafts or not p.draft)])
 
 
 def fetch_gitlab(remotes: dict[str, Remote], settings: dict, run: Runner, errors: list[str], home: str) -> tuple[list[MyPr], list[ReviewPr]]:
@@ -367,12 +417,12 @@ def approve(pr: ReviewPr, run: Runner = subprocess.run) -> Optional[str]:
 
 
 def fetch_all(
-    projects: dict[str, Remote], settings: dict, run: Runner, now: float, cache: Path = PLUGIN_CACHE, home: str = str(Path.home())
+    projects: dict[str, Remote], settings: dict, run: Runner, now: float, home: str = str(Path.home()), sleep: Callable[[float], None] = time.sleep
 ) -> PrData:
     """`projects` maps a project's folder to its git remote; only those repositories are looked at."""
     remotes = {path: r for path, r in projects.items()}
     errors: list[str] = []
-    gh_mine, gh_review = fetch_github(remotes, settings, run, cache, errors)
+    gh_mine, gh_review = fetch_github(remotes, settings, run, errors, sleep)
     gl_mine, gl_review = fetch_gitlab(remotes, settings, run, errors, home)
     return PrData(
         mine=link_stacks(gh_mine + gl_mine), review=sorted(gh_review + gl_review, key=lambda p: p.created_at),

@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -2364,6 +2364,7 @@ def group_header(title: str, subtitle: str, count: int, width: int) -> Line:
 PR_FLAG_STYLE = {
     "conflicts": "chip_bad", "changes requested": "chip_bad", "checks failing": "chip_bad", "unresolved threads": "chip_warn",
     "draft": "chip_info", "nobody asked": "chip_warn", "behind base": "chip_warn", "checks running": "chip_info",
+    "re-requested": "chip_warn", "teammate-changes-requested": "chip_bad", "teammate-approved": "chip_good",
 }
 
 
@@ -4201,9 +4202,9 @@ def demo_prs(now: float) -> prs.PrData:
                  depth=1, parent=233, created_at=now - 1 * day, updated_at=now - 1 * day, draft=True, merge="clean"),
     ]
     review = [
-        prs.ReviewPr("github", "acme/billing-api", 482, "Refactor checkout totals", "https://github.com/acme/billing-api/pull/482", "maria", created_at=now - 2 * day),
+        prs.ReviewPr("github", "acme/billing-api", 482, "Refactor checkout totals", "https://github.com/acme/billing-api/pull/482", "maria", created_at=now - 2 * day, flags=("re-requested",)),
         prs.ReviewPr("github", "acme/billing-api", 231, "Bump stripe-php to 15.2", "https://github.com/acme/billing-api/pull/231", "dave", created_at=now - 1 * day),
-        prs.ReviewPr("github", "acme/web-app", 479, "Add CSV export to the citations report", "https://github.com/acme/web-app/pull/479", "tom", created_at=now - 5 * day),
+        prs.ReviewPr("github", "acme/web-app", 479, "Add CSV export to the citations report", "https://github.com/acme/web-app/pull/479", "tom", created_at=now - 5 * day, flags=("teammate-approved",)),
     ]
     repos = {"github:acme/billing-api": "/srv/www/billing-api", "github:acme/web-app": "/srv/www/web-app", "gitlab:acme/mobile-app": "/srv/www/mobile-app"}
     return prs.PrData(mine=mine, review=review, errors=[], fetched_at=now - 4 * 60, repos=repos)
@@ -4327,10 +4328,6 @@ def doctor_checks(run: Callable = subprocess.run, which: Callable = shutil.which
                 ok(tool, f"installed and logged in ({what})")
             else:
                 warn(tool, f"installed but not logged in: run `{how}` for {what}")
-    if prs.find_skill_script("my-prs-list", "my_prs_list.py"):
-        ok("pull-request plugin", "found: your own PRs are read through it")
-    else:
-        warn("pull-request plugin", "optional, not found: without it the board cannot list your own GitHub PRs (GitLab and the review queue still work)")
 
     clipboard = next((t for t in ("wl-copy", "xclip", "xsel", "pbcopy") if which(t)), None)
     if clipboard:

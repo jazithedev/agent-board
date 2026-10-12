@@ -83,7 +83,6 @@ class Doctor(unittest.TestCase):
         self.patches = [
             mock.patch.object(ab, "LIMITS_PATH", tmp / "limits.json"),
             mock.patch.object(ab, "META_PATH", tmp / "cfg" / "meta.json"),
-            mock.patch.object(ab.prs, "find_skill_script", lambda *a, **k: None),
         ]
         for p in self.patches:
             p.start()

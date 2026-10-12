@@ -1,7 +1,5 @@
 import json
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 import pullrequests as pr
@@ -63,25 +61,57 @@ class Classification(unittest.TestCase):
 
 
 class Normalising(unittest.TestCase):
-    def test_github_my_prs_json(self):
-        payload = {"prs": [{
-            "repo": "o/r", "number": 7, "title": "T", "url": "https://x/7", "base": "main", "head": "WEB-1-x", "parent": None, "depth": 0,
-            "ticket": "WEB-1", "is_draft": False, "decision": "CHANGES_REQUESTED", "reviews": {"maria": "CHANGES_REQUESTED"},
-            "requested": ["tom"], "checks": "FAILURE", "checks_stale": False, "merge_state": "DIRTY",
-            "created_at": "2026-10-01T10:00:00Z", "updated_at": "2026-10-08T10:00:00Z"}]}
-        [p] = pr.github_my_prs(payload)
-        self.assertEqual((p.decision, p.merge, p.checks, p.ticket, p.reviewed, p.requested), ("changes", "conflict", "fail", "WEB-1", True, ("tom",)))
-        self.assertEqual(p.attention, ["conflicts", "changes requested", "checks failing"])
+    def test_github_my_pr_node(self):
+        node = mine_node("o/r", 7, headRefName="web-1-x", baseRefName="main", reviewDecision="CHANGES_REQUESTED", mergeStateStatus="DIRTY",
+                         reviewRequests={"nodes": [{"requestedReviewer": {"login": "tom"}}, {"requestedReviewer": {"name": "Core"}}]},
+                         latestReviews={"nodes": [{"state": "CHANGES_REQUESTED", "author": {"__typename": "User", "login": "maria"}}]},
+                         commits={"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]})
+        p = pr.github_my_pr(node)
+        self.assertEqual((p.repo, p.number, p.base, p.head), ("o/r", 7, "main", "web-1-x"))
+        self.assertEqual((p.decision, p.merge, p.checks, p.checks_stale, p.ticket, p.reviewed, p.requested),
+                         ("changes", "conflict", "fail", True, "WEB-1", True, ("tom", "Core")))
+        self.assertEqual(p.attention, ["conflicts", "changes requested"])  # failing checks behind a conflict are an old result
 
-    def test_review_search_items_drop_drafts_unless_asked(self):
-        items = [
-            {"number": 1, "title": "a", "html_url": "u1", "repository_url": "https://api.github.com/repos/o/r", "user": "maria", "created_at": "2026-10-01T00:00:00Z", "draft": False},
-            {"number": 2, "title": "b", "html_url": "u2", "repository_url": "https://api.github.com/repos/o/r", "user": "tom", "created_at": "2026-10-02T00:00:00Z", "draft": True},
-        ]
-        self.assertEqual([p.number for p in pr.github_review_from_search(items, include_drafts=False)], [1])
-        both = pr.github_review_from_search(items, include_drafts=True)
-        self.assertEqual([(p.number, p.repo, p.author, p.draft) for p in both], [(1, "o/r", "maria", False), (2, "o/r", "tom", True)])
+    def test_ticket_comes_from_the_branch_then_the_title(self):
+        self.assertEqual(pr.ticket_of("bi-5008-split", "BI-1 elsewhere"), "BI-5008")
+        self.assertEqual(pr.ticket_of("fix-it", "BI-1234 fix it"), "BI-1234")
+        self.assertEqual(pr.ticket_of("fix-it", "fix it"), "")
 
+    def test_a_pr_only_a_bot_reviewed_counts_as_not_reviewed(self):
+        node = mine_node("o/r", 1, latestReviews={"nodes": [{"state": "COMMENTED", "author": {"__typename": "Bot", "login": "copilot-pull-request-reviewer"}}]})
+        self.assertFalse(pr.github_my_pr(node).reviewed)
+        self.assertIn("nobody asked", pr.github_my_pr(node).notes)
+
+
+class ReviewFlags(unittest.TestCase):
+    def flags(self, requested=(), **reviews):
+        node = review_node("o/r", 1, author="dev", requested=requested, reviews=reviews)
+        return pr.github_review_pr(node, "me").flags
+
+    def test_new_when_nobody_reviewed(self):
+        self.assertEqual(self.flags(requested=("me",)), ("new",))
+
+    def test_re_requested_after_you_reviewed(self):
+        self.assertEqual(self.flags(requested=("me",), me="COMMENTED"), ("re-requested",))
+
+    def test_a_team_request_after_your_review_is_not_a_re_request(self):
+        self.assertEqual(self.flags(requested=("Core",), me="APPROVED"), ("new",))
+
+    def test_teammates_approving_and_asking_for_changes(self):
+        self.assertEqual(self.flags(requested=("me",), maria="APPROVED", tom="CHANGES_REQUESTED"), ("teammate-changes-requested", "teammate-approved"))
+
+    def test_the_author_and_bots_are_not_teammates(self):
+        node = review_node("o/r", 1, author="dev", requested=("me",), reviews={"dev": "COMMENTED"})
+        node["latestReviews"]["nodes"].append({"state": "APPROVED", "author": {"__typename": "Bot", "login": "copilot-pull-request-reviewer"}})
+        node["latestReviews"]["nodes"].append({"state": "APPROVED", "author": {"__typename": "User", "login": "renovate[bot]"}})
+        self.assertEqual(pr.github_review_pr(node, "me").flags, ("new",))
+
+    def test_review_pr_fields(self):
+        p = pr.github_review_pr(review_node("o/r", 5, author="maria", isDraft=True), "me")
+        self.assertEqual((p.provider, p.repo, p.number, p.author, p.draft, p.url), ("github", "o/r", 5, "maria", True, "https://github.com/o/r/pull/5"))
+
+
+class MoreNormalising(unittest.TestCase):
     def test_gitlab_merge_request_mapping(self):
         mr = {"iid": 12, "title": "Fix", "web_url": "https://gitlab.com/g/p/-/merge_requests/12", "source_branch": "fix", "target_branch": "master",
               "draft": False, "references": {"full": "g/p!12"}, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z", "reviewers": [{"username": "maria"}]}
@@ -101,38 +131,32 @@ class Normalising(unittest.TestCase):
         out = {p.number: (p.parent, p.depth) for p in pr.link_stacks([a, b, c])}
         self.assertEqual(out, {1: (None, 0), 2: (1, 1), 3: (2, 2)})
 
-    def test_script_lookup_takes_the_newest_installed_version(self):
-        root = Path(tempfile.mkdtemp())
-        for v in ("1.2.0", "1.10.0", "1.9.3"):
-            f = root / "mkt" / "pull-request" / v / "skills" / "my-prs-list" / "scripts" / "my_prs_list.py"
-            f.parent.mkdir(parents=True)
-            f.write_text("")
-        self.assertIn("1.10.0", str(pr.find_skill_script("my-prs-list", "my_prs_list.py", root)))
-        self.assertIsNone(pr.find_skill_script("other-skill", "my_prs_list.py", root))
-
 
 class FakeWorld:
-    """Stands in for gh, glab and the plugin scripts; records every command."""
+    """Stands in for gh and glab; records every command."""
 
     def __init__(self):
         self.calls = []
         self.fail = set()
-        self.my_prs = {"prs": []}
-        self.search = []
+        self.mine = []
+        self.review = []
+        self.merge_unknown_for = 0  # how many GitHub answers still report UNKNOWN merge states
         self.gl_mine = []
         self.gl_review = []
         self.gl_approvals = {}
 
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
-        key = "gh" if cmd[0] == "gh" else "glab" if cmd[0] == "glab" else Path(cmd[1]).name if cmd[0] == "python3" else cmd[0]
+        key = cmd[0]
         if key in self.fail:
             return SimpleNamespace(returncode=1, stdout="", stderr=f"{key} exploded\n")
         ok = lambda data: SimpleNamespace(returncode=0, stdout=data if isinstance(data, str) else json.dumps(data), stderr="")
-        if key == "my_prs_list.py":
-            return ok(self.my_prs)
         if key == "gh":
-            return ok("\n".join(json.dumps(i) for i in self.search))
+            mine = self.mine
+            if self.merge_unknown_for:
+                self.merge_unknown_for -= 1
+                mine = [{**n, "mergeStateStatus": "UNKNOWN"} for n in mine]
+            return ok({"data": {"viewer": {"login": "me"}, "mine": {"nodes": mine}, "review": {"nodes": self.review}}})
         endpoint = cmd[-1]
         if endpoint == "user":
             return ok({"username": "me"})
@@ -145,25 +169,19 @@ class FakeWorld:
         return ok({"has_conflicts": False, "detailed_merge_status": "mergeable", "head_pipeline": {"status": "success"}, "blocking_discussions_resolved": True})
 
 
-def cache_with_scripts():
-    root = Path(tempfile.mkdtemp())
-    for skill, name in (("my-prs-list", "my_prs_list.py"),):
-        f = root / "m" / "pull-request" / "1.2.0" / "skills" / skill / "scripts" / name
-        f.parent.mkdir(parents=True)
-        f.write_text("")
-    return root
-
-
-def my_json(repo, number, **kw):
-    d = {"repo": repo, "number": number, "title": f"PR {number}", "url": f"https://github.com/{repo}/pull/{number}", "decision": None, "merge_state": "CLEAN",
-         "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z"}
+def mine_node(repo, number, **kw):
+    d = {"number": number, "title": f"PR {number}", "url": f"https://github.com/{repo}/pull/{number}", "repository": {"nameWithOwner": repo},
+         "author": {"login": "me"}, "isDraft": False, "baseRefName": "main", "headRefName": f"b{number}", "reviewDecision": None,
+         "mergeStateStatus": "CLEAN", "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-02T00:00:00Z"}
     d.update(kw)
     return d
 
 
-def search_item(repo, number, **kw):
-    d = {"number": number, "title": f"R{number}", "html_url": f"https://github.com/{repo}/pull/{number}",
-         "repository_url": f"https://api.github.com/repos/{repo}", "user": "maria", "created_at": "2026-10-01T00:00:00Z", "draft": False}
+def review_node(repo, number, author="maria", requested=("me",), reviews=None, **kw):
+    d = {"number": number, "title": f"R{number}", "url": f"https://github.com/{repo}/pull/{number}", "repository": {"nameWithOwner": repo},
+         "author": {"login": author}, "isDraft": False, "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-01T00:00:00Z",
+         "reviewRequests": {"nodes": [{"requestedReviewer": {"login": w}} for w in requested]},
+         "latestReviews": {"nodes": [{"state": st, "author": {"__typename": "User", "login": w}} for w, st in (reviews or {}).items()]}}
     d.update(kw)
     return d
 
@@ -171,48 +189,71 @@ def search_item(repo, number, **kw):
 class Fetching(unittest.TestCase):
     def setUp(self):
         self.world = FakeWorld()
-        self.cache = cache_with_scripts()
+        self.slept = []
         self.projects = {"/srv/www/live-chat": pr.Remote("github", "octo/live-chat"), "/srv/www/scum-map": pr.Remote("gitlab", "scum-map/scum-map")}
 
     def fetch(self, **settings):
-        return pr.fetch_all(self.projects, settings, self.world, NOW, cache=self.cache, home="/home/x")
+        return pr.fetch_all(self.projects, settings, self.world, NOW, home="/home/x", sleep=self.slept.append)
 
     def test_only_repositories_of_known_projects_are_kept(self):
-        self.world.my_prs = {"prs": [my_json("octo/live-chat", 1), my_json("Acme/Tools", 2)]}
-        self.world.search = [search_item("octo/live-chat", 5), search_item("Acme/Tools", 6)]
+        self.world.mine = [mine_node("octo/live-chat", 1), mine_node("Acme/Tools", 2)]
+        self.world.review = [review_node("octo/live-chat", 5), review_node("Acme/Tools", 6)]
         data = self.fetch()
         self.assertEqual([p.number for p in data.mine], [1])
         self.assertEqual([p.number for p in data.review], [5])
         self.assertEqual(data.errors, [])
+
+    def test_one_github_request_carries_both_lists_and_no_plugin_script_runs(self):
+        self.world.mine = [mine_node("octo/live-chat", 1)]
+        self.world.review = [review_node("octo/live-chat", 5)]
+        self.fetch()
+        github = [c for c in self.world.calls if c[0] == "gh"]
+        self.assertEqual(len(github), 1)
+        self.assertEqual(github[0][:3], ["gh", "api", "graphql"])
+        self.assertFalse(any(c[0] == "python3" for c in self.world.calls))
+
+    def test_stacks_are_linked_by_branch(self):
+        self.world.mine = [mine_node("octo/live-chat", 1, headRefName="a"), mine_node("octo/live-chat", 2, headRefName="b", baseRefName="a")]
+        self.assertEqual({p.number: p.parent for p in self.fetch().mine}, {1: None, 2: 1})
+
+    def test_unknown_merge_states_are_asked_again(self):
+        self.world.mine = [mine_node("octo/live-chat", 1)]
+        self.world.merge_unknown_for = 1
+        data = self.fetch()
+        self.assertEqual(data.mine[0].merge, "clean")
+        self.assertEqual(len([c for c in self.world.calls if c[0] == "gh"]), 2)
+        self.assertEqual(self.slept, [1.0])
+
+    def test_merge_states_still_unknown_after_three_tries_are_shown_as_unknown(self):
+        self.world.mine = [mine_node("octo/live-chat", 1)]
+        self.world.merge_unknown_for = 5
+        data = self.fetch()
+        self.assertEqual(data.mine[0].merge, "unknown")
+        self.assertEqual(len([c for c in self.world.calls if c[0] == "gh"]), 3)
 
     def test_github_is_not_queried_when_no_project_is_on_github(self):
         self.projects = {"/srv/www/scum-map": pr.Remote("gitlab", "scum-map/scum-map")}
         self.fetch()
         self.assertFalse(any(c[0] in ("gh", "python3") for c in self.world.calls))
 
-    def test_the_review_queue_never_runs_the_to_review_list_script(self):
-        self.world.search = [search_item("octo/live-chat", 5)]
-        data = self.fetch(review_teams={"octo": {"include": ["core"], "exclude": ["other"]}})  # left over from older versions: ignored
+    def test_leftover_review_team_settings_are_ignored(self):
+        self.world.review = [review_node("octo/live-chat", 5)]
+        data = self.fetch(review_teams={"octo": {"include": ["core"], "exclude": ["other"]}})
         self.assertEqual([p.number for p in data.review], [5])
-        self.assertFalse(any("to_review_list" in " ".join(c) for c in self.world.calls))
 
     def test_drafts_are_hidden_from_the_review_queue_by_default(self):
-        self.world.search = [search_item("octo/live-chat", 5, draft=True)]
+        self.world.review = [review_node("octo/live-chat", 5, isDraft=True)]
         self.assertEqual(self.fetch().review, [])
         self.assertEqual(len(self.fetch(include_drafts=True).review), 1)
 
     def test_a_failing_source_is_reported_without_losing_the_others(self):
-        self.world.fail.add("my_prs_list.py")
-        self.world.search = [search_item("octo/live-chat", 5)]
+        self.world.fail.add("gh")
+        self.world.gl_mine = [{"iid": 1, "project_id": 7, "title": "MR", "web_url": "u", "references": {"full": "scum-map/scum-map!1"}}]
         data = self.fetch()
-        self.assertEqual([p.number for p in data.review], [5])
+        self.assertEqual([p.number for p in data.mine], [1])
         self.assertEqual(len(data.errors), 1)
-        self.assertIn("your PRs", data.errors[0])
+        self.assertIn("GitHub (pull requests)", data.errors[0])
         self.assertIn("exploded", data.errors[0])
-
-    def test_missing_plugin_is_explained(self):
-        self.cache = Path(tempfile.mkdtemp())
-        self.assertTrue(any("plugin was not found" in e for e in self.fetch().errors))
 
     def test_gitlab_my_merge_requests_and_review_queue(self):
         mr = lambda iid, **kw: {"iid": iid, "project_id": 7, "title": f"MR {iid}", "web_url": f"https://gitlab.com/scum-map/scum-map/-/merge_requests/{iid}",

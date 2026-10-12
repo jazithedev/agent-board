@@ -137,11 +137,11 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
  ⇣ 3 to review    ⚑ 2 of yours need you (1 conflict · 1 changes · 1 CI failing)    ✓ 1 ready to merge───
 
   ● billing-api  2   github · acme/billing-api
-▌ [ ]  #482  Refactor checkout totals                                                @maria    2d  ⟳
+▌ [ ]  #482  Refactor checkout totals  re-requested                                   @maria    2d  ⟳
   [ ]  #231  Bump stripe-php to 15.2                                                      @dave    1d
 
   ● web-app  1   github · acme/web-app
-  [ ]  #479  Add CSV export to the citations report                                       @tom    5d
+  [ ]  #479  Add CSV export to the citations report  teammate-approved                     @tom    5d
 
   ● mobile-app  0   gitlab · acme/mobile-app
      nothing waiting on you ✓
@@ -174,15 +174,8 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 ## Pull requests: setup
 
 1. Log in once: `gh auth login` and/or `glab auth login`.
-2. **Your own GitHub PRs** are read through the `pull-request` plugin's script, so stacks and review states match `/pull-request:my-prs-list`:
-
-   ```
-   /plugin marketplace add jazithedev/ai-marketplace
-   /plugin install pull-request@jazis-ai-marketplace
-   ```
-
-   Without it everything else still works (GitLab, the review queue); the board just says it could not list your own GitHub PRs.
-3. **Review queue**: the open PRs that request your review, by name or through one of your teams, as GitHub's `review-requested:@me` search finds them.
+2. **GitHub** takes one request per refresh (`gh api graphql`): your open PRs, with their review decision, merge state, checks and stacks, and the open PRs that request your review, by name or through one of your teams (`review-requested:@me`).
+3. **Review queue chips**: `re-requested` (asked again after you reviewed), `teammate-changes-requested` and `teammate-approved` (someone other than you and the author reviewed; bots such as Copilot do not count).
 4. **Review sessions** run `/code-review:code-review <urls>` by default (from the same marketplace: `/plugin install code-review@jazis-ai-marketplace`). Change the command, and the prompt used for GitLab merge requests, in `ctrl+o` if you use something else, for example the built-in `/code-review`.
 
 ## Account limits: setup
