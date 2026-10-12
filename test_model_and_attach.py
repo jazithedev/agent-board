@@ -405,6 +405,61 @@ def _below(tree, pid):
     return out
 
 
+class Descendants(unittest.TestCase):
+    """Opening a session checks its processes ten times a second, so finding them must stay cheap."""
+
+    def tree(self):
+        import subprocess
+        parent = subprocess.Popen(["sh", "-c", "sleep 30 & wait"])
+        self.addCleanup(lambda: (parent.kill(), parent.wait()))
+        for _ in range(100):
+            found = ab.descendants(parent.pid)
+            if found:
+                return parent.pid, found
+            time.sleep(0.02)
+        self.fail("the child never started")
+
+    def test_finds_a_child_through_the_kernel_lists(self):
+        pid, found = self.tree()
+        self.assertEqual(len(found), 1)
+        self.assertIn("sleep", " ".join(ab.read_argv(found[0])))
+
+    def test_matches_the_full_walk_when_the_kernel_has_no_lists(self):
+        pid, found = self.tree()
+        with mock.patch.object(ab, "CHILDREN_FILES", False):
+            self.assertEqual(ab.descendants(pid), found)
+
+    def test_does_not_walk_every_process_when_the_kernel_lists_children(self):
+        if not ab.CHILDREN_FILES:
+            self.skipTest("this kernel does not list children")
+        pid, _ = self.tree()
+        with mock.patch.object(ab, "_children", side_effect=AssertionError("walked all of /proc")):
+            ab.descendants(pid)
+
+    def test_a_process_that_is_gone_has_none(self):
+        self.assertEqual(ab.descendants(2**22 + 12345), [])
+
+
+class RefreshWhileOpen(unittest.TestCase):
+    """Nobody sees the board while a session is open, so `claude agents` is not run every two seconds then."""
+
+    def run_once(self, b):
+        loader = ab.Loader(b, demo=False)
+        loader.stop.wait = lambda _: loader.stop.set()
+        with mock.patch.object(ab, "load_sessions", return_value=[]) as load:
+            loader.run()
+        return load.call_count
+
+    def test_refreshes_while_the_board_is_shown(self):
+        self.assertEqual(self.run_once(board()), 1)
+
+    def test_waits_while_a_session_is_open(self):
+        b = board()
+        b.attached = True
+        self.assertEqual(self.run_once(b), 0)
+        self.assertEqual([s.id for s in b.sessions], ["id1"])
+
+
 class AttachBridge(unittest.TestCase):
     def test_leaving_the_session_screen_returns_at_once_even_if_the_session_lingers(self):
         out, taken, _ = run_bridge("leave", [b"x"])

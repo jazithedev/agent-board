@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1196,6 +1196,7 @@ class Board:
         self.marked: set[str] = set()
         self.settingsui: Optional[dict] = None  # {'idx': int, 'edit': {'field','text'} | None}
         self.refresh_requested = threading.Event()
+        self.attached = False  # a session has the terminal; the session list waits until the board is back
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
@@ -3215,10 +3216,36 @@ def _children() -> dict[int, list[int]]:
     return tree
 
 
+def _direct_children(pid: int) -> list[int]:
+    """The kernel's own list of a process's children, one small file per thread: no walk over every process."""
+    found: list[int] = []
+    try:
+        tasks = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return found  # gone
+    for tid in tasks:
+        try:
+            with open(f"/proc/{pid}/task/{tid}/children") as f:
+                found += [int(c) for c in f.read().split()]
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+CHILDREN_FILES = os.path.exists(f"/proc/self/task/{os.getpid()}/children")  # needs CONFIG_PROC_CHILDREN; most kernels have it
+
+
 def descendants(pid: int) -> list[int]:
-    tree, found, queue = _children(), [], [pid]
+    """Every process below `pid`. Opening a session checks this ten times a second, so it reads only the
+    branch under `pid` where the kernel lists children; walking all of /proc that often kept a core half busy."""
+    if CHILDREN_FILES:
+        children = _direct_children
+    else:
+        tree = _children()
+        children = lambda p: tree.get(p, [])
+    found, queue = [], [pid]
     while queue:
-        for child in tree.get(queue.pop(), []):
+        for child in children(queue.pop()):
             found.append(child)
             queue.append(child)
     return found
@@ -3369,7 +3396,10 @@ def attach_failure_notice(result: AttachResult, name: str) -> Optional[tuple[str
     return f"✗ could not open “{name}”: details in the popup", reason + advice
 
 
-def attach_session(claude: str, session_id: str, poll: float = 0.03) -> AttachResult:
+ATTACH_SCAN_SECONDS = 0.1  # how often an open session's processes are checked for the ← relaunch and Ctrl+Z
+
+
+def attach_session(claude: str, session_id: str, poll: float = 0.03, scan_every: float = ATTACH_SCAN_SECONDS) -> AttachResult:
     """Runs `claude attach` behind a pseudo-terminal of our own and relays keys and output both ways.
 
     Why not hand it the real terminal: pressing ← makes `claude attach` leave its screen and start a fresh
@@ -3421,7 +3451,7 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03) -> AttachRe
                 typed = os.read(stdin_fd, 65536)
                 if typed:
                     _write_all(master, typed)
-            if time.time() - last_scan >= poll:
+            if time.time() - last_scan >= scan_every:
                 last_scan = time.time()
                 pids = [proc.pid] + descendants(proc.pid)
                 relaunched = any(is_agent_view_argv(read_argv(p)) or has_relaunch_marker(p) for p in pids)
@@ -3684,7 +3714,7 @@ class Loader(threading.Thread):
     def run(self) -> None:
         while not self.stop.is_set():
             try:
-                if not self.demo:
+                if not self.demo and not self.board.attached:  # nobody sees the board while a session is open
                     self.board.set_sessions(load_sessions())
                 self.error = ""
             except Exception as exc:  # keep the board alive; surface the reason in the footer
@@ -4008,9 +4038,11 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         sys.stdout.write(HAND_OVER)
         sys.stdout.flush()
         result = None
+        board.attached = True
         try:
             result = attach_session(CLAUDE, effect.session_id)
         finally:
+            board.attached = False
             sys.stdout.write(SYNC_BEGIN + HAND_OVER + ENTER_ALT_SCREEN)
             sys.stdout.flush()
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
