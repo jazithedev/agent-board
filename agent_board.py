@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -985,7 +985,7 @@ HELP_COMMON_END = [
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
     "sessions": [
-        ("↑ / ↓", "select a session (↑ from the first row returns to the prompt)"),
+        ("↑ / ↓", "select a session (stops at the first and last; esc returns to the prompt)"),
         ("alt+↑ / alt+↓", "jump between groups"),
         ("alt+1 … alt+6", "open the Nth visible session"),
         ("enter / → / click", "open the selected session (a draft in the prompt is kept)"),
@@ -1800,7 +1800,7 @@ class Board:
             self.sel = ids[0] if delta > 0 else ids[-1]
             return
         i = ids.index(self.sel) + delta
-        self.sel = None if i < 0 else ids[min(i, len(ids) - 1)]
+        self.sel = ids[max(0, min(i, len(ids) - 1))]  # stops at either end; esc goes back to the prompt
 
     def _enter_pr(self, pr) -> Effect:
         """Enter on a pull request: jump to a session already working on it, else open it in the browser."""

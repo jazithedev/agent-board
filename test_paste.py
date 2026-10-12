@@ -244,7 +244,7 @@ class DraftAndSessions(unittest.TestCase):
 
     def test_the_draft_survives_the_round_trip_and_can_still_be_sent(self):
         self.b.handle("enter")  # opens the session; the board comes back later
-        self.b.handle("up")  # focus back on the prompt
+        self.b.handle("esc")  # focus back on the prompt
         self.assertIsNone(self.b.sel)
         effect = self.b.handle("enter")
         self.assertEqual((effect.kind, effect.prompt), ("dispatch", "half-written task"))
@@ -277,7 +277,7 @@ class DraftAndSessions(unittest.TestCase):
         self.assertIn("draft kept", text)
         draft = [style for l in lines for t, style in l.segs if "half-written task" in t]
         self.assertEqual(draft, ["dim"])
-        self.b.handle("up")
+        self.b.handle("esc")
         lines, _ = ab.compose(self.b, 120, 24)
         self.assertEqual([style for l in lines for t, style in l.segs if "half-written task" in t], ["bold"])
 

@@ -92,11 +92,21 @@ class Interaction(unittest.TestCase):
     def setUp(self):
         self.b = board([make(1, "working", "alpha"), make(2, "done", "beta", updated=10), make(3, "done", "gamma", updated=20)])
 
-    def test_down_from_input_selects_first_visible_row_and_up_returns(self):
+    def test_down_from_input_selects_first_visible_row_and_esc_returns(self):
         self.b.handle("down")
         self.assertEqual(self.b.sel, "id1")
-        self.b.handle("up")
+        self.b.handle("esc")
         self.assertIsNone(self.b.sel)
+
+    def test_up_stops_at_the_first_session_as_down_stops_at_the_last(self):
+        self.b.handle("down")
+        self.b.handle("down")
+        for _ in range(5):
+            self.b.handle("up")
+        self.assertEqual(self.b.sel, self.b.flat()[0].id)  # never wraps around to the bottom of the list
+        for _ in range(5):
+            self.b.handle("down")
+        self.assertEqual(self.b.sel, self.b.flat()[-1].id)
 
     def test_enter_and_right_attach(self):
         self.b.handle("down")
