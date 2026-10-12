@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -401,6 +401,8 @@ def suggest_tags(prompt: str, meta: Meta) -> list[str]:
 USAGE_DAYS = 14
 RIGHT_MARGIN = 3
 HEADER_ROWS = 4  # a padding row, the title bar, the pull-request strip and a spacer under it
+LIST_ROWS_BESIDE_LIMITS = 6  # a long list keeps at least this many rows when the LIMITS block is pinned under it
+LIST_ROWS_BESIDE_USAGE = 12  # ... and this many before the USAGE panel is pinned too
 APP_NAME = "Jazi's Agent Board"
 APP_MARK = "🦎"
 
@@ -2410,6 +2412,17 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     if not body and board.mode not in PR_VIEWS:
         owners = [None, None]
         body = [Line([]), Line([("   No sessions" + (" match your search" if board.query else " yet — type a task below"), "faint")])]
+    # The LIMITS block, and the USAGE panel above it, are pinned under the list; a long list scrolls in the rows left above them
+    panels: list[Line] = []
+    if not (board.help or board.peek or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
+        limits_block = limits_panel(board.limits, inner, board.now(), board.disk)
+        if body_h - len(limits_block) - 1 >= min(len(body), LIST_ROWS_BESIDE_LIMITS):
+            panels = limits_block
+            room = body_h - len(panels) - 2 - min(len(body), LIST_ROWS_BESIDE_USAGE)
+            if board.usage and room >= 4:
+                panels = usage_panel(board.usage, inner, min(9, room)) + [Line([])] + panels
+    if panels:
+        body_h -= len(panels) + 1  # the list's rows, with a blank line between it and the panels
     if sel_range:
         if sel_range[0] < board.scroll:
             board.scroll = sel_range[0] - (1 if sel_range[0] > 0 and not body[sel_range[0] - 1].segs else 0)
@@ -2422,17 +2435,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         inline_caret = (HEADER_ROWS + rename_at[0] - board.scroll, rename_at[1])
     board.hit = {HEADER_ROWS + i: owner for i, owner in enumerate(owners[board.scroll : board.scroll + body_h]) if owner}
     view += [Line([]) for _ in range(body_h - len(view))]
-    spare = body_h - len(body) - 1
-    if spare >= 2 and not (board.help or board.peek or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
-        bottom = body_h
-        limits_block = limits_panel(board.limits, inner, board.now(), board.disk)
-        if len(limits_block) <= spare:
-            view[bottom - len(limits_block) :] = limits_block
-            bottom -= len(limits_block) + 1
-            spare -= len(limits_block) + 1
-        if board.usage and spare >= 4:
-            panel = usage_panel(board.usage, inner, min(9, spare))
-            view[bottom - len(panel) : bottom] = panel
+    if panels:
+        view += [Line([])] + panels
     lines.extend(view)
 
     if board.help:

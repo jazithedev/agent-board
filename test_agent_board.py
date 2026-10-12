@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -814,7 +815,30 @@ class AccountLimits(unittest.TestCase):
                 self.assertLessEqual(ab.seg_width(line.segs), width, ab.plain(line))
         crowded = board([make(i, "done", f"s{i}", updated=i) for i in range(30)])
         crowded.limits = ab.demo_limits(NOW)
-        self.assertNotIn("LIMITS", "\n".join(ab.plain(l) for l in ab.compose(crowded, 110, 16)[0]))
+        self.assertNotIn("LIMITS", "\n".join(ab.plain(l) for l in ab.compose(crowded, 110, 16)[0]))  # too short to keep a usable list
+
+    def test_panels_stay_pinned_under_a_list_that_scrolls(self):
+        crowded = board([make(i, "done", f"s{i}", updated=i) for i in range(30)])
+        crowded.limits = ab.demo_limits(NOW)
+        crowded.usage = ab.demo_usage()
+        crowded.sel = crowded.flat()[-1].id
+        lines = [ab.plain(l) for l in ab.compose(crowded, 120, 50)[0]]
+        limits_at = next(i for i, l in enumerate(lines) if "LIMITS" in l)
+        usage_at = next(i for i, l in enumerate(lines) if "USAGE" in l)
+        self.assertEqual(limits_at, len(lines) - 6)  # still right above the rule, input and hint
+        self.assertLess(usage_at, limits_at)
+        last = crowded.flat()[-1].name
+        last_at = next(i for i, l in enumerate(lines) if re.search(rf"\b{last}\b", l))
+        self.assertLess(last_at, usage_at)  # the selected last session scrolls into view above the panels
+        self.assertEqual(lines[usage_at - 1].strip(), "")
+
+    def test_usage_panel_is_dropped_before_the_list_gets_cramped(self):
+        crowded = board([make(i, "done", f"s{i}", updated=i) for i in range(30)])
+        crowded.limits = ab.demo_limits(NOW)
+        crowded.usage = ab.demo_usage()
+        text = "\n".join(ab.plain(l) for l in ab.compose(crowded, 120, 26)[0])
+        self.assertIn("LIMITS", text)
+        self.assertNotIn("USAGE", text)
 
     def test_usage_panel_gives_way_to_limits_not_the_other_way_round(self):
         b = board([make(1)])
