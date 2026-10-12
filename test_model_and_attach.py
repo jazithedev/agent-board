@@ -441,11 +441,11 @@ class Descendants(unittest.TestCase):
 
 
 class RefreshWhileOpen(unittest.TestCase):
-    """Nobody sees the board while a session is open, so `claude agents` is not run every two seconds then."""
+    """Nobody sees the board while a session is open, so `claude agents` is not run then."""
 
     def run_once(self, b):
         loader = ab.Loader(b, demo=False)
-        loader.stop.wait = lambda _: loader.stop.set()
+        loader.pause = loader.stop.set
         with mock.patch.object(ab, "load_sessions", return_value=[]) as load:
             loader.run()
         return load.call_count
@@ -458,6 +458,15 @@ class RefreshWhileOpen(unittest.TestCase):
         b.attached = True
         self.assertEqual(self.run_once(b), 0)
         self.assertEqual([s.id for s in b.sessions], ["id1"])
+
+    def test_coming_back_refreshes_at_once(self):
+        b = board()
+        loader = ab.Loader(b, demo=False)
+        b.sessions_due.set()
+        started = time.time()
+        loader.pause()
+        self.assertLess(time.time() - started, 1)
+        self.assertFalse(b.sessions_due.is_set())
 
 
 class AttachBridge(unittest.TestCase):

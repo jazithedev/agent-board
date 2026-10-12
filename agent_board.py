@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -46,7 +46,7 @@ LIMITS_PATH = Path(os.environ.get("AGENT_BOARD_LIMITS", Path.home() / ".cache" /
 META_PATH = Path(
     os.environ.get("AGENT_BOARD_META", Path.home() / ".config" / "agent-board" / "meta.json")
 )
-REFRESH_SECONDS = 2.0
+REFRESH_SECONDS = 5.0  # each refresh starts Claude Code once (~0.3 s of CPU); every 2 s cost a tenth of a core
 SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
 WAITING_MARK = "⧗"  # a working session whose turn is over, waiting on a background task it started
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]")
@@ -1197,6 +1197,7 @@ class Board:
         self.settingsui: Optional[dict] = None  # {'idx': int, 'edit': {'field','text'} | None}
         self.refresh_requested = threading.Event()
         self.attached = False  # a session has the terminal; the session list waits until the board is back
+        self.sessions_due = threading.Event()  # set to refresh the session list now instead of on the next tick
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
@@ -3719,7 +3720,12 @@ class Loader(threading.Thread):
                 self.error = ""
             except Exception as exc:  # keep the board alive; surface the reason in the footer
                 self.error = f"refresh failed: {exc}"
-            self.stop.wait(REFRESH_SECONDS)
+            self.pause()
+
+    def pause(self) -> None:
+        """Until the next refresh is due, or sooner when the board asks (coming back from a session)."""
+        if self.board.sessions_due.wait(REFRESH_SECONDS):
+            self.board.sessions_due.clear()
 
 
 class UsageLoader(threading.Thread):
@@ -4043,6 +4049,7 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
             result = attach_session(CLAUDE, effect.session_id)
         finally:
             board.attached = False
+            board.sessions_due.set()  # the list waited while the session was open
             sys.stdout.write(SYNC_BEGIN + HAND_OVER + ENTER_ALT_SCREEN)
             sys.stdout.flush()
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
@@ -4168,6 +4175,7 @@ def main_loop(scr, demo: bool) -> None:
                 break
     finally:
         loader.stop.set()
+        board.sessions_due.set()
         set_bracketed_paste(False)
         set_motion_tracking(False)
 
