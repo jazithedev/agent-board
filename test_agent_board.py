@@ -98,6 +98,21 @@ class Interaction(unittest.TestCase):
         self.b.handle("esc")
         self.assertIsNone(self.b.sel)
 
+    def test_home_and_end_jump_to_the_first_and_last_session(self):
+        self.b.handle("down")
+        self.b.handle("end")
+        self.assertEqual(self.b.sel, self.b.flat()[-1].id)
+        self.b.handle("home")
+        self.assertEqual(self.b.sel, self.b.flat()[0].id)
+
+    def test_home_and_end_in_the_prompt_still_move_the_caret(self):
+        self.b.handle("paste", "abc")
+        self.b.handle("home")
+        self.assertIsNone(self.b.sel)
+        self.assertEqual(self.b.cursor, 0)
+        self.b.handle("end")
+        self.assertEqual(self.b.cursor, 3)
+
     def test_up_stops_at_the_first_session_as_down_stops_at_the_last(self):
         self.b.handle("down")
         self.b.handle("down")

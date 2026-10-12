@@ -216,6 +216,7 @@ sudo apt install wl-clipboard   # Wayland
 | Key | Does |
 |---|---|
 | `↑` `↓` · click | select a session · open it |
+| `home` `end` | jump to the first / last session (in the prompt they move the caret) |
 | `enter` `→` | open the selected session |
 | type, then `enter` | start a new background session; it is selected, so `→` opens it |
 | `/` | list slash commands and skills: `↑` `↓` choose, `tab` or `enter` completes |

@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -986,6 +986,7 @@ HELP_COMMON_END = [
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
     "sessions": [
         ("↑ / ↓", "select a session (stops at the first and last; esc returns to the prompt)"),
+        ("home / end", "jump to the first / last session"),
         ("alt+↑ / alt+↓", "jump between groups"),
         ("alt+1 … alt+6", "open the Nth visible session"),
         ("enter / → / click", "open the selected session (a draft in the prompt is kept)"),
@@ -2075,6 +2076,8 @@ class Board:
             self._move(-1)
         elif key == "down":
             self._move(1)
+        elif key in ("home", "end") and s and self.flat():  # in the prompt they move the caret instead
+            self.sel = self.flat()[0 if key == "home" else -1].id
         elif key == "alt+up":
             self._jump_group(-1)
         elif key == "alt+down":
