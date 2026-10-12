@@ -1,6 +1,7 @@
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import agent_board as ab
@@ -288,6 +289,60 @@ class MyPullRequests(unittest.TestCase):
         ab.compose(b, 110, 24)
         b.click(next(iter(b.hit)))
         self.assertEqual(b.queued_effect, ab.Effect("attach", session_id="s1"))
+
+
+class FixConflicts(unittest.TestCase):
+    """f on one of your PRs with conflicts starts a background session that resolves them."""
+
+    def setUp(self):
+        self.b = board("mine", mine=[mine(7, merge="conflict", head="BI-1-split", base="main"), mine(8)])
+        self.b.pr_sel = self.b.pr_flat()[0].key
+
+    def start(self, returncode=0, stderr=""):
+        calls = []
+
+        def fake_cli(args, cwd=None, timeout=60):
+            calls.append((args, cwd))
+            return mock.Mock(returncode=returncode, stdout="", stderr=stderr)
+
+        with mock.patch.object(ab, "run_cli", fake_cli), mock.patch.object(ab, "load_sessions", lambda: []):
+            ab.start_conflict_session(self.b, self.b.prs.mine[0])
+        return calls
+
+    def test_f_on_a_conflicted_pr_asks_for_a_session(self):
+        effect = self.b.handle("char", "f")
+        self.assertEqual((effect.kind, [p.number for p in effect.items]), ("fix_conflicts", [7]))
+
+    def test_f_on_a_pr_without_conflicts_only_says_so(self):
+        self.b.pr_sel = next(p.key for p in self.b.pr_flat() if p.number == 8)
+        self.assertIsNone(self.b.handle("char", "f"))
+        self.assertEqual(self.b.msg, "#8 has no conflicts to fix")
+
+    def test_f_does_nothing_in_the_review_queue(self):
+        b = board("review", review=[review(5)])
+        b.pr_sel = b.pr_flat()[0].key
+        self.assertIsNone(b.handle("char", "f"))
+
+    def test_the_session_runs_in_the_project_with_the_branches_named(self):
+        [(args, cwd)] = self.start()
+        self.assertEqual(cwd, "/srv/www/billing-api")
+        self.assertEqual(args[0], "--bg")
+        prompt = args[-1]
+        for part in ("PR #7", "https://example.com/acme/billing-api/pull/7", "`BI-1-split`", "origin/main", "never a force push", "worktree"):
+            self.assertIn(part, prompt)
+        self.assertIn("fixing the conflicts in #7", self.b.msg)
+
+    def test_the_prompt_tags_the_session_with_the_pr_so_it_shows_the_link(self):
+        prompt = ab.conflict_prompt(self.b.prs.mine[0])
+        self.assertIn(ab.Tag("PR #7", "pr"), ab.derive_tags(prompt))
+
+    def test_a_merge_request_is_called_one(self):
+        mr = mine(3, provider="gitlab", repo="scum-map/scum-map", merge="conflict", head="fix", base="master")
+        self.assertIn("MR !3", ab.conflict_prompt(mr))
+
+    def test_a_failure_is_reported(self):
+        self.start(returncode=1, stderr="not trusted\n")
+        self.assertEqual(self.b.msg, "✗ could not start fixing #7: not trusted")
 
 
 class Settings(unittest.TestCase):

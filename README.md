@@ -165,9 +165,9 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 ```
 
 - **Review queue**: what is waiting for your review. `space` marks PRs, `r` starts **one review session per project** for the marked ones. `a` approves the highlighted PR on GitHub (`gh`) or GitLab (`glab`) after one confirming key (`a` or `enter`); once approved it leaves the queue. PRs opened more than 30 days ago are hidden (the footer says how many); change the age, or show every PR, in settings (`ctrl+o`).
-- **My pull requests**: yours, sorted by what needs you: conflicts, changes requested, failing checks, unresolved threads, or *ready to merge*. Stacked PRs stay nested.
+- **My pull requests**: yours, sorted by what needs you: conflicts, changes requested, failing checks, unresolved threads, or *ready to merge*. Stacked PRs stay nested. `f` on a PR with conflicts starts a background session in its project that merges the base branch into the PR branch (in a new worktree), resolves the conflicts, runs the tests that cover them and pushes; never a force push, and it asks you when a conflict is ambiguous. A ⟳ marks the PR while it works.
 - A one-line strip under the title keeps the counts visible in every view. Refresh is every 15 minutes by default; change it (or set it to manual) in settings (`ctrl+o`), or press `ctrl+l`.
-- GitHub uses `gh`; GitLab uses `glab`. Everything is **read-only**.
+- GitHub uses `gh`; GitLab uses `glab`. Lookups are **read-only**; only `a` (approve) and the sessions you start change anything.
 
 **Usage, limits and disk** (optional). The bottom of the screen can show your recent usage (turns, tokens, models, projects, from your local transcripts), your **5-hour and weekly rate limits** (account-wide) with a countdown to each reset, and a **Disk** row: how full the disk is, how much is free, and how much Claude Code's own data and your sessions' git worktrees take. The bar turns yellow below 15% free and red below 5%. If your projects live on another disk, each disk gets its own row.
 

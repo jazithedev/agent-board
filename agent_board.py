@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -363,6 +363,12 @@ DEFAULT_PR_REFRESH = 15
 REVIEW_AGE_CHOICES = [0, 7, 14, 30, 60, 90, 180, 365]  # the review queue hides PRs opened longer ago than this many days; 0 = keep all
 DEFAULT_REVIEW_AGE = 30
 DEFAULT_REVIEW_COMMAND = "/code-review:code-review {urls}"
+CONFLICT_PROMPT = (
+    "Resolve the merge conflicts in {kind} {ref} ({url}): branch `{head}` against its base `{base}`. "
+    "Work in a new git worktree so the main checkout stays untouched. Fetch origin, check out `{head}`, merge `origin/{base}` into it "
+    "and resolve every conflict, keeping what both sides meant. Run the tests that cover the files you touched, commit the merge "
+    "and push the branch: a normal push, never a force push. If a conflict is ambiguous, stop and ask me instead of guessing."
+)
 DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading each one and its diff with glab: {urls}"
 VIEW_ORDER = ("status", "project", "review", "mine")
 PR_VIEWS = ("review", "mine")
@@ -1122,6 +1128,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("alt+↑ / alt+↓", "jump between groups"),
         ("enter / click", "jump to a session already on that PR (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
+        ("f", "fix conflicts: a background session merges the base into the branch, resolves them and pushes"),
         ("ctrl+f", "filter pull requests"),
         *HELP_COMMON_END,
         ("esc", "clear the filter, then back to the session list"),
@@ -1919,6 +1926,10 @@ class Board:
             if chosen:
                 return Effect("review", items=chosen)
             self.msg = "nothing selected: move onto a PR or mark some with space"
+        elif key == "char" and ch == "f" and self.mode == "mine" and p:
+            if p.merge == "conflict":
+                return Effect("fix_conflicts", items=[p])
+            self.msg = f"{pr_ref(p)} has no conflicts to fix"
         elif key == "char" and ch == "o" and p:
             return Effect("browse", url=p.url)
         elif key in ("enter", "right") and p:
@@ -2962,7 +2973,7 @@ def _hint_segs(board: Board) -> list[Seg]:
     elif board.mode == "review":
         hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+l refresh · ctrl+o settings · esc back"
     elif board.mode == "mine":
-        hint = "enter open · o browser · ctrl+l refresh · ctrl+o settings · ctrl+s next view · esc back"
+        hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+o settings · ctrl+s next view · esc back"
     elif board.sel:
         s = board.selected()
         stop = "stop" if s and s.group in ("working", "idle") else "delete"
@@ -3905,6 +3916,26 @@ def start_review_sessions(board: Board, items: list) -> None:
     board.set_sessions(load_sessions())
 
 
+def conflict_prompt(pr) -> str:
+    gitlab = pr.provider == "gitlab"
+    return CONFLICT_PROMPT.format(kind="MR" if gitlab else "PR", ref=pr_ref(pr), url=pr.url, head=pr.head or "the PR branch", base=pr.base or "the base branch")
+
+
+def start_conflict_session(board: Board, pr) -> None:
+    """A background session in the PR's project that merges the base into the branch, resolves the conflicts and pushes."""
+    name, path = board.pr_project(pr)
+    try:
+        r = run_cli(bg_command(conflict_prompt(pr), board.model()), cwd=path or None)
+    except (OSError, subprocess.SubprocessError) as exc:
+        board.msg = f"✗ could not start fixing {pr_ref(pr)}: {exc}"
+        return
+    if r.returncode == 0:
+        board.msg = f"✓ fixing the conflicts in {pr_ref(pr)} in {name}: a ⟳ marks the PR while the session works"
+    else:
+        board.msg = f"✗ could not start fixing {pr_ref(pr)}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
+    board.set_sessions(load_sessions())
+
+
 ACTION_LABEL = {"stop": "stopping…", "remove": "removing…"}
 
 
@@ -4042,6 +4073,9 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         return True
     if effect.kind == "review":
         start_review_sessions(board, effect.items)
+        return True
+    if effect.kind == "fix_conflicts":
+        start_conflict_session(board, effect.items[0])
         return True
     if effect.kind == "approve":
         start_approval(board, effect.items[0])
