@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -3262,7 +3262,9 @@ def descendants(pid: int) -> list[int]:
         children = _direct_children
     else:
         tree = _children()
-        children = lambda p: tree.get(p, [])
+
+        def children(p: int) -> list[int]:
+            return tree.get(p, [])
     found, queue = [], [pid]
     while queue:
         for child in children(queue.pop()):

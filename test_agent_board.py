@@ -1355,7 +1355,7 @@ class TagsAreKept(unittest.TestCase):
 
     def test_they_survive_a_restart_of_the_board(self):
         tmp = tempfile.mkdtemp()
-        b = board([make(1, auto_tags=ab.derive_tags("BI-5010 and PR #28957"))], tmp)
+        board([make(1, auto_tags=ab.derive_tags("BI-5010 and PR #28957"))], tmp)  # sees the tags and remembers them
         again = board([make(1, auto_tags=[])], tmp)
         self.assertEqual([t.label for t in again.tags_of(again.sessions[0])], ["Ticket: BI-5010", "PR #28957"])
 
