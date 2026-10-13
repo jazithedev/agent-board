@@ -481,21 +481,26 @@ class PasteChips(unittest.TestCase):
 
 
 class Display(unittest.TestCase):
-    def test_line_breaks_show_as_a_glyph_and_the_end_of_a_long_prompt_stays_visible(self):
+    def test_a_long_prompt_grows_into_rows_that_show_all_of_it(self):
         b = board()
         b.handle("paste", "start of it\n" + "middle " * 40 + "THE END")
-        lines, caret = ab.compose(b, 80, 20)
-        prompt = next(ab.plain(l) for l in lines if l.segs and "❯" in ab.plain(l))
-        self.assertIn("THE END", prompt)
-        self.assertNotIn("\n", prompt)
-        self.assertLessEqual(ab.seg_width(next(l for l in lines if "❯" in ab.plain(l)).segs), 80)
-        self.assertIsNotNone(caret)
+        lines, caret = ab.compose(b, 80, 40)
+        first = next(i for i, l in enumerate(lines) if "❯" in ab.plain(l))
+        rows = [ab.plain(l) for l in lines[first:-1]]
+        self.assertGreater(len(rows), 3)
+        self.assertTrue(rows[0].startswith(" ❯ start of it"))
+        self.assertEqual(sum(r.count("middle") for r in rows), 40)
+        self.assertTrue(" ".join(r.strip() for r in rows).endswith("middle THE END"))
+        self.assertTrue(all(ab.seg_width(l.segs) <= 80 for l in lines))
+        self.assertEqual(caret[0], len(lines) - 2)  # on the prompt's last row, at the end of the text
 
-    def test_glyph_for_breaks_in_a_short_prompt(self):
+    def test_a_line_break_starts_a_new_row(self):
         b = board()
         b.handle("paste", "one\ntwo")
-        text = "\n".join(ab.plain(l) for l in ab.compose(b, 100, 20)[0])
-        self.assertIn("one ⏎ two", text)
+        rows = [ab.plain(l) for l in ab.compose(b, 100, 20)[0]]
+        i = next(i for i, r in enumerate(rows) if "❯" in r)
+        self.assertTrue(rows[i].startswith(" ❯ one "))
+        self.assertEqual(rows[i + 1].rstrip(), "   two")
 
     def test_fit_tail(self):
         self.assertEqual(ab.fit_tail("abcdef", 4), "…def")

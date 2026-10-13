@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1178,7 +1178,7 @@ class Board:
         self.launch_cwd = launch_cwd
         self.mode = self.grouping  # status | project (the Sessions tab, grouped that way) | review | mine
         self.input = ""
-        self.prompt_hit: Optional[tuple[int, int, list[tuple[int, int]]]] = None  # (row, first column, [(column, index)]) of the drawn prompt, for clicks
+        self.prompt_hit: Optional[tuple[int, int, list[tuple[int, int, int]]]] = None  # (first row, first column, [(row, column, index)]) of the drawn prompt, for clicks
         self.pastes: dict[int, str] = {}  # the full text behind each [Pasted text #N] chip in the prompt
         self.paste_seq = 0
         self.query = ""
@@ -2128,12 +2128,13 @@ class Board:
         return after[i - 1][1] if i else self.cursor
 
     def click_prompt(self, y: int, x: int) -> None:
-        """A click in the prompt line puts the caret at the nearest character boundary."""
+        """A click in the prompt puts the caret at the nearest character boundary of the row clicked."""
         hit = self.prompt_hit
-        if not hit or y != hit[0] or not hit[2] or self.mode in PR_VIEWS:
+        row = [b for b in hit[2] if b[0] == y - hit[0]] if hit else []
+        if not row or self.mode in PR_VIEWS:
             return
         self.sel = None
-        self.cursor = min(hit[2], key=lambda b: abs(hit[1] + b[0] - x))[1]
+        self.cursor = min(row, key=lambda b: abs(hit[1] + b[1] - x))[2]
 
     def prompt_text(self, text: Optional[str] = None) -> str:
         """The prompt as it will be sent: every chip replaced by the text it stands for."""
@@ -2613,7 +2614,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     lines.append(Line(strip + [("─" * max(0, width - seg_width(strip)), "rule")]))
     lines.append(Line([]))  # air between the strip and the first group
 
-    body_h = max(1, height - HEADER_ROWS - 3)
+    prompt_lines, prompt_caret, prompt_hit = prompt_area(board, width, inner, max(1, (height - HEADER_ROWS - 3) // 2))
+    body_h = max(1, height - HEADER_ROWS - 2 - len(prompt_lines))
     body: list[Line] = []
     owners: list[Optional[str]] = []
     sel_range: Optional[tuple[int, int]] = None
@@ -2700,56 +2702,75 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
             _overlay_mention(lines, width, matches, chosen)
 
     lines.append(Line([("─" * width, "rule")]))
-    board.prompt_hit = None
-    caret: Optional[tuple[int, int]] = None
     input_y = len(lines)
+    lines.extend(prompt_lines)
+    board.prompt_hit = (input_y, prompt_hit[0], prompt_hit[1]) if prompt_hit else None
+    caret = (input_y + prompt_caret[0], prompt_caret[1]) if prompt_caret else None
+    lines.append(Line(_ellipsize(_hint_segs(board), inner)))
+    if inline_caret:
+        caret = inline_caret
+    return [Line(_clip(l.segs, width), l.selected) for l in lines[:height]], caret
+
+
+def prompt_area(board: Board, width: int, inner: int, max_rows: int) -> tuple[list[Line], Optional[tuple[int, int]], Optional[tuple[int, list[tuple[int, int, int]]]]]:
+    """The rows under the list: the prompt (as tall as its text, up to `max_rows`), else a field being edited or a PR note.
+
+    Returns (lines, caret (row, column) within them, (first text column, [(row, column, text index)]) for clicks)."""
+    caret: Optional[tuple[int, int]] = None
     editing_setting = board.settingsui["edit"] if board.settingsui else None
     if editing_setting:
         name = dict(board.settings_fields()).get(editing_setting["field"], "setting")
         pre = [(" ", "normal"), (f"✎ {name} ", "accent")]
-        lines.append(Line(pre + [(fit(editing_setting["text"], max(5, width - seg_width(pre) - 1)), "bold")]))
-        caret = (input_y, min(width - 1, seg_width(pre) + cell_width(editing_setting["text"])))
-    elif board.edit and board.edit["kind"] == "find":  # a rename is edited in the session's own row instead
+        line = Line(pre + [(fit(editing_setting["text"], max(5, width - seg_width(pre) - 1)), "bold")])
+        return [line], (0, min(width - 1, seg_width(pre) + cell_width(editing_setting["text"]))), None
+    if board.edit and board.edit["kind"] == "find":  # a rename is edited in the session's own row instead
         label = "⌕ find "
         pre = [(" ", "normal"), (label, "accent")]
         text = board.edit["text"]
         shown, col, _ = prompt_window(text, board.edit.get("cursor", len(text)), width - seg_width(pre) - 1, "bold")
-        lines.append(Line(pre + shown))
-        caret = (input_y, min(width - 1, seg_width(pre) + col))
-    elif board.mode in PR_VIEWS:
+        return [Line(pre + shown)], (0, min(width - 1, seg_width(pre) + col)), None
+    if board.mode in PR_VIEWS:
         n = len(board.marked)
         text = f"{n} marked for review" if n else ("space marks a PR for review, r starts a review session" if board.mode == "review" else "enter opens a PR; a ⟳ marks a PR a session is already working on")
         old = board.hidden_by_age() if board.mode == "review" and not n else 0
         if old:
             text += f" · {old} older than {board.review_age_days()} days hidden (ctrl+o)"
-        lines.append(Line([(" ", "normal"), ("◆ " if n else "  ", "accent"), (text, "bold" if n else "faint")]))
+        return [Line([(" ", "normal"), ("◆ " if n else "  ", "accent"), (text, "bold" if n else "faint")])], None, None
+    pre = [(" ❯ ", "accent")]
+    target_name, _ = board.start_target()
+    chosen = board.model()
+    model_seg = (model_label(chosen), "accent" if chosen else "faint")
+    options = [
+        [(f"in {target_name}", "faint"), ("  ·  ", "faint"), model_seg, ("  ctrl+p ctrl+e ", "faint")],
+        [(f"in {target_name}", "faint"), ("  ·  ", "faint"), model_seg, (" ", "faint")],
+        [model_seg, (" ", "faint")],
+    ]
+    placeholder = "describe a task for a new session"
+    room = inner - seg_width(pre) - (seg_width(prompt_segs(board.input, "bold")) if board.input else cell_width(placeholder)) - 2
+    right = next((o for o in options if seg_width(o) <= room), options[-1])
+    hit, top = None, 0
+    if board.input:
+        rows, (caret_row, caret_col), bounds = prompt_wrap(
+            board.input, board.cursor, inner - seg_width(pre) - seg_width(right) - 2, inner - seg_width(pre) - 1, "bold" if board.sel is None else "dim"
+        )
+        top = max(0, min(caret_row - max_rows + 1, len(rows) - max_rows))  # a prompt taller than the room scrolls with its caret
+        shown = rows[top : top + max_rows]
+        hit = (seg_width(pre), [(r - top, c, i) for r, c, i in bounds if top <= r < top + len(shown)])
+        caret_row -= top
     else:
-        pre = [(" ❯ ", "accent")]
-        target_name, _ = board.start_target()
-        chosen = board.model()
-        model_seg = (model_label(chosen), "accent" if chosen else "faint")
-        options = [
-            [(f"in {target_name}", "faint"), ("  ·  ", "faint"), model_seg, ("  ctrl+p ctrl+e ", "faint")],
-            [(f"in {target_name}", "faint"), ("  ·  ", "faint"), model_seg, (" ", "faint")],
-            [model_seg, (" ", "faint")],
-        ]
-        placeholder = "describe a task for a new session"
-        room = inner - seg_width(pre) - (seg_width(prompt_segs(board.input, "bold")) if board.input else cell_width(placeholder)) - 2
-        right = next((o for o in options if seg_width(o) <= room), options[-1])
-        caret_col = 0
-        if board.input:
-            body_segs, caret_col, bounds = prompt_window(board.input, board.cursor, inner - seg_width(pre) - seg_width(right) - 2, "bold" if board.sel is None else "dim")
-            board.prompt_hit = (input_y, seg_width(pre), bounds)
+        rows = shown = [[(placeholder, "faint")]]
+        caret_row = caret_col = 0
+    lines = []
+    for r, body_segs in enumerate(shown):
+        if (r == 0 and top) or (r == len(shown) - 1 and top + len(shown) < len(rows)):
+            lead = [(" ⋮ ", "faint")]  # more of the prompt above or below
         else:
-            body_segs = [("describe a task for a new session", "faint")]
-        used = seg_width(pre) + seg_width(body_segs)
-        lines.append(Line(pre + body_segs + [(" " * max(1, inner - used - seg_width(right)), "normal")] + right))
-        if board.sel is None and not (board.help or board.peek or board.confirm or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
-            caret = (input_y, seg_width(pre) + caret_col)
-    lines.append(Line(_ellipsize(_hint_segs(board), inner)))
-    if inline_caret:
-        caret = inline_caret
-    return [Line(_clip(l.segs, width), l.selected) for l in lines[:height]], caret
+            lead = pre if r == 0 else [("   ", "normal")]
+        tail = [(" " * max(1, inner - seg_width(lead) - seg_width(body_segs) - seg_width(right)), "normal")] + right if r == 0 else []
+        lines.append(Line(lead + body_segs + tail))
+    if board.sel is None and not (board.help or board.peek or board.confirm or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
+        caret = (caret_row, seg_width(pre) + caret_col)
+    return lines, caret, hit
 
 
 def _ellipsize(segs: list[Seg], width: int) -> list[Seg]:
@@ -2895,6 +2916,63 @@ def prompt_window(text: str, cursor: int, width: int, style: str) -> tuple[list[
     if hi < n:
         segs.append(("…", "faint"))
     return segs, caret_col, bounds
+
+
+def prompt_wrap(text: str, cursor: int, first_width: int, width: int, style: str) -> tuple[list[list[Seg]], tuple[int, int], list[tuple[int, int, int]]]:
+    """The whole prompt wrapped into rows: (rows of pieces, caret (row, column), [(row, column, text index)]).
+
+    Rows break between words where they can and at every line break; the first row is `first_width` wide, the rest `width`."""
+    toks = prompt_tokens(text)
+    items: list[tuple[str, str]] = []
+    for a, b in toks:
+        piece = text[a:b]
+        items.append((f" {piece} ", "chip_info") if PASTE_CHIP_RE.fullmatch(piece) else ("" if piece == "\n" else piece, style))
+    wid = [cell_width(d) for d, _ in items]
+    is_space = [text[a:b] == " " for a, b in toks]
+    rows: list[list[int]] = [[]]
+    used = 0
+    for i, (a, b) in enumerate(toks):
+        if text[a:b] == "\n":
+            rows[-1].append(i)
+            rows.append([])
+            used = 0
+            continue
+        room = max(1, first_width if len(rows) == 1 else width)
+        if used + wid[i] > room and rows[-1] and not is_space[i]:  # a space may hang past the edge, a break never starts a row
+            row = rows[-1]
+            cut = next((k + 1 for k in range(len(row) - 1, -1, -1) if is_space[row[k]]), 0)
+            carry = row[cut:] if cut else []
+            if sum(wid[j] for j in carry) + wid[i] > width:
+                carry = []  # one word longer than a row is cut where the row ends
+            del row[len(row) - len(carry) :]
+            rows.append(carry)
+            used = sum(wid[j] for j in carry)
+        rows[-1].append(i)
+        used += wid[i]
+    ci = sum(1 for t in toks if t[1] <= cursor)
+    out: list[list[Seg]] = []
+    bounds: list[tuple[int, int, int]] = []
+    caret: Optional[tuple[int, int]] = None
+    col = 0
+    for r, row in enumerate(rows):
+        segs: list[Seg] = []
+        col = 0
+        for j in row:
+            if j == ci:
+                caret = (r, col)
+            bounds.append((r, col, toks[j][0]))
+            piece, piece_style = items[j]
+            if segs and segs[-1][1] == piece_style and piece_style != "chip_info":
+                segs[-1] = (segs[-1][0] + piece, piece_style)
+            elif piece:
+                segs.append((piece, piece_style))
+            col += wid[j]
+        if not row:
+            bounds.append((r, 0, len(text)))
+        elif text[toks[row[-1]][0] : toks[row[-1]][1]] != "\n":
+            bounds.append((r, col, toks[row[-1]][1]))
+        out.append(segs)
+    return out, caret or (len(rows) - 1, col), bounds
 
 
 def tail_segs(segs: list[Seg], width: int) -> list[Seg]:

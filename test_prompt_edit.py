@@ -146,11 +146,42 @@ class Window(unittest.TestCase):
     def test_a_click_maps_back_to_a_text_index(self):
         b = board()
         type_(b, "hello world")
-        b.prompt_hit = (30, 3, ab.prompt_window(b.input, b.cursor, 40, "bold")[2])
+        b.prompt_hit = (30, 3, ab.prompt_wrap(b.input, b.cursor, 40, 40, "bold")[2])
         b.click(30, 3 + 5)
         self.assertEqual(b.cursor, 5)
         b.click(30, 3 + 99)
         self.assertEqual(b.cursor, len(b.input))
+
+    def test_a_click_on_a_lower_row_of_a_wrapped_prompt_moves_the_caret_there(self):
+        b = board()
+        type_(b, "alpha beta gamma delta")
+        b.prompt_hit = (30, 3, ab.prompt_wrap(b.input, b.cursor, 11, 11, "bold")[2])
+        b.click(31, 3 + 2)  # second row starts with "gamma"
+        self.assertEqual(b.cursor, b.input.index("gamma") + 2)
+
+    def test_wrapping_breaks_between_words(self):
+        rows, caret, _ = ab.prompt_wrap("alpha beta gamma delta", 22, 11, 11, "bold")
+        self.assertEqual(["".join(t for t, _ in r) for r in rows], ["alpha beta ", "gamma delta"])
+        self.assertEqual(caret, (1, 11))
+
+    def test_a_word_longer_than_a_row_is_cut_at_the_edge(self):
+        rows, _, _ = ab.prompt_wrap("x" * 25, 0, 10, 10, "bold")
+        self.assertEqual(["".join(t for t, _ in r) for r in rows], ["x" * 10, "x" * 10, "x" * 5])
+
+    def test_a_prompt_taller_than_half_the_screen_scrolls_with_its_caret(self):
+        b = board()
+        b.handle("paste", "\n".join(f"line {i}" for i in range(40)))
+        lines, caret = ab.compose(b, 100, 30)
+        first = next(i for i, l in enumerate(lines) if "line" in ab.plain(l) and ab.plain(l).startswith(" ⋮ "))
+        rows = [ab.plain(l) for l in lines[first:-1]]
+        self.assertLessEqual(len(rows), (30 - ab.HEADER_ROWS - 3) // 2)
+        self.assertIn("line 39", rows[-1])
+        self.assertEqual(caret[0], len(lines) - 2)
+        b.cursor = 0  # back to the top of the text
+        rows = [ab.plain(l) for l in ab.compose(b, 100, 30)[0]]
+        i = next(i for i, r in enumerate(rows) if "❯" in r)
+        self.assertTrue(rows[i].startswith(" ❯ line 0"))
+        self.assertTrue(rows[-2].startswith(" ⋮ "))
 
     def test_compose_places_the_terminal_caret_at_the_text_caret(self):
         b = board()
