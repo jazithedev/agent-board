@@ -676,10 +676,18 @@ class IdleSessions(unittest.TestCase):
         self.assertIn("10m", row)  # how long ago it stopped, not how long it has been running
         self.assertIn("Idle", text)
 
-    def test_stopping_an_idle_session_offers_stop_not_delete(self):
+    def test_ctrl_x_on_an_idle_session_offers_to_delete_it(self):
         b = board([make(1, "working", "quiet one", idle=True)])
         b.handle("down")
-        self.assertIn("stop", ab.plain(ab.Line(ab._hint_segs(b))))
+        self.assertIn("ctrl+x delete", ab.plain(ab.Line(ab._hint_segs(b))))
+        b.handle("ctrl+x")
+        self.assertEqual(b.confirm["kind"], "remove")
+        self.assertEqual(b.handle("char", "x").kind, "remove")
+
+    def test_ctrl_x_on_a_working_session_still_only_stops_it(self):
+        b = board([make(1, "working", "busy one")])
+        b.handle("down")
+        self.assertIn("ctrl+x stop", ab.plain(ab.Line(ab._hint_segs(b))))
         b.handle("ctrl+x")
         self.assertEqual(b.confirm["kind"], "stop")
 

@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1093,7 +1093,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("ctrl+r", "rename the session right in its row, typing replaces the selected old name (kept by the board only)"),
         ("ctrl+g", "tags: pick, create, rename, delete (ctrl+r / ctrl+x inside)"),
         ("ctrl+t", "pin the session to the top"),
-        ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x or ctrl+x again confirms)"),
+        ("ctrl+x", "stop a working session / delete an idle or finished one (asks first: x or ctrl+x again confirms)"),
         ("type, then enter", "start a new background session; it is selected, so → opens it"),
         ("@", "type @ for your projects: tab or enter completes @name, and the session starts in that project"),
         ("/", "slash commands: type / for the list, ↑/↓ choose, tab or enter completes it"),
@@ -2317,7 +2317,7 @@ class Board:
         elif key == "ctrl+t" and s:
             self.meta.update(s.id, pinned=not self.pinned(s))
         elif key == "ctrl+x" and s:
-            self.confirm = {"kind": "stop" if s.group in ("working", "idle") else "remove", "sid": s.id}
+            self.confirm = {"kind": "stop" if s.group == "working" else "remove", "sid": s.id}  # idle and finished ones are deleted
         elif key == "ctrl+l":
             return Effect("refresh_prs")
         elif key == "ctrl+o":
@@ -3073,7 +3073,7 @@ def _hint_segs(board: Board) -> list[Seg]:
         hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+o settings · ctrl+s next view · esc back"
     elif board.sel:
         s = board.selected()
-        stop = "stop" if s and s.group in ("working", "idle") else "delete"
+        stop = "stop" if s and s.group == "working" else "delete"
         hint = ("draft kept · " if board.input else "") + f"enter open · space peek · ctrl+r rename · ctrl+g tags · ctrl+t pin · ctrl+x {stop} · ? shortcuts"
     elif board.slash_query() is not None and board.slash_view()[0]:
         n = len(board.slash_view()[0])
@@ -4140,28 +4140,6 @@ def start_dispatch(board: Board, effect: Effect) -> threading.Thread:
     return worker
 
 
-def close_woken_session(board: Board, session_id: str, delay: float = 1.0) -> threading.Thread:
-    """A finished session you opened only to look wakes up and would stay "Idle, still open" after you leave.
-    Once it has settled, if it is idle (no work running, nothing waiting on you) it is stopped, so it goes back to
-    Completed. A session that went on working, or asks you something, is left alone."""
-
-    def work() -> None:
-        time.sleep(delay)
-        try:
-            fresh = load_sessions()
-        except Exception:  # not worth a message: the session simply stays as it is
-            return
-        woken = next((x for x in fresh if x.id == session_id), None)
-        if woken and woken.group == "idle":
-            board.set_sessions(fresh)
-            start_session_action(board, Effect("stop", session_id=session_id))
-
-    worker = threading.Thread(target=work, daemon=True)
-    board.workers.append(worker)
-    worker.start()
-    return worker
-
-
 def register_new_session(board: Board, effect: Effect, first_line: str, started: bool) -> bool:
     """Tags a session just started from the prompt and arranges for it to be selected once it shows up,
     so one → opens it. Returns True when it will be selected."""
@@ -4223,8 +4201,6 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
             scr.clearok(True)  # repaint everything: the session drew over our screen
             board.sync_open = True
         opened = next((x for x in board.sessions if x.id == effect.session_id), None)
-        if opened and opened.group == "done" and not (result and result.failed):
-            close_woken_session(board, effect.session_id)  # it was Completed before you opened it
         notice = attach_failure_notice(result, board.name_of(opened) if opened else effect.session_id) if result else None
         if notice:
             board.msg = notice[0]
