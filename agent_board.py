@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -375,7 +375,7 @@ PR_VIEWS = ("review", "mine")
 VIEW_LABEL = {"status": "by status", "project": "by project", "review": "review queue", "mine": "my pull requests"}
 TABS = (("sessions", "Sessions"), ("review", "Review queue"), ("mine", "My PRs"))  # the title row's tabs; Sessions is grouped by status or project
 GROUPINGS = ("status", "project")
-MINE_GROUPS = [("attention", "Needs attention"), ("ready", "Ready to merge"), ("waiting", "Waiting")]
+MINE_GROUPS = [("attention", "Needs attention"), ("ready", "Ready to merge"), ("waiting", "Waiting"), ("draft", "Draft")]
 DEFAULT_LIBRARY = ["Bug", "Feature", "Docs", "Plan", "Tests", "Code Review", "Pull Request", "Urgent", "Blocked"]
 DEFAULT_RULES = [
     {"tag": "Bug", "pattern": r"\b(bug|fix(es|ed)?|broken|crash(es|ed)?|errors?|exceptions?|regression|fail(s|ed|ing)?)\b"},
@@ -1775,7 +1775,7 @@ class Board:
             return {"review": 0, "attention": 0, "ready": 0, "reasons": {}}
         reasons: dict[str, int] = {}
         for p in data.mine:
-            for r in p.attention:
+            for r in p.attention if p.group == "attention" else []:
                 reasons[r] = reasons.get(r, 0) + 1
         return {
             "review": len(self.review_prs()),
@@ -2426,7 +2426,7 @@ def pr_row(board: Board, pr, depth: int, width: int, selected: bool) -> Line:
         age = fmt_age(now - pr.created_at) if pr.created_at else ""
         right: list[Seg] = [(f"@{pr.author}" if pr.author else "", "dim"), (f"  {age:>4}", "dim")]
     else:
-        icon, style = {"attention": ("✗", "fail"), "ready": ("✓", "done"), "waiting": ("○", "dim")}[pr.group]
+        icon, style = {"attention": ("✗", "fail"), "ready": ("✓", "done"), "waiting": ("○", "dim"), "draft": ("◌", "faint")}[pr.group]
         nest = "└ " * min(depth, 1) if depth else ""
         lead = [("▌" if selected else " ", "accent"), (" ", "normal"), (icon, style), ("  ", "normal"), ("  " * max(0, depth - 1) + nest, "faint")]
         flags = pr.attention + pr.notes

@@ -118,6 +118,8 @@ class MyPr:
 
     @property
     def group(self) -> str:
+        if self.draft:  # a draft is not asking for review or a merge yet, whatever else is true of it
+            return "draft"
         if self.attention:
             return "attention"
         return "ready" if self.decision == "approved" else "waiting"
@@ -125,11 +127,9 @@ class MyPr:
     @property
     def notes(self) -> list[str]:
         notes = []
-        if self.draft:
-            notes.append("draft")
         if self.group == "ready" and self.merge == "behind":
             notes.append("behind base")
-        if self.group == "waiting" and not self.draft and not self.requested and not self.reviewed:
+        if self.group == "waiting" and not self.requested and not self.reviewed:
             notes.append("nobody asked")
         if self.checks == "pending":
             notes.append("checks running")

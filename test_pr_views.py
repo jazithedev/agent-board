@@ -227,12 +227,24 @@ class MyPullRequests(unittest.TestCase):
             mine(4, parent=3, depth=1, draft=True), mine(5, decision="changes", checks="fail"),
         ])
 
-    def test_groups_in_order_attention_ready_waiting(self):
-        self.assertEqual([(g[0], len(g[2])) for g in self.b.pr_groups()], [("Needs attention", 2), ("Ready to merge", 1), ("Waiting", 2)])
+    def test_groups_in_order_attention_ready_waiting_draft(self):
+        self.assertEqual([(g[0], len(g[2])) for g in self.b.pr_groups()], [("Needs attention", 2), ("Ready to merge", 1), ("Waiting", 1), ("Draft", 1)])
+
+    def test_the_draft_section_is_at_the_very_bottom(self):
+        text = [ab.plain(l) for l in ab.compose(self.b, 120, 30)[0]]
+        heading = next(i for i, l in enumerate(text) if l.strip().startswith("Draft"))
+        self.assertTrue(any("Mine 4" in l for l in text[heading:]))
+        self.assertFalse(any(l.strip().startswith(("Needs attention", "Ready to merge", "Waiting")) for l in text[heading:]))
+
+    def test_a_draft_with_conflicts_counts_neither_as_needing_you_nor_ready(self):
+        b = board("mine", mine=[mine(8, draft=True, merge="conflict"), mine(9, draft=True, decision="approved")])
+        counts = b.pr_counts()
+        self.assertEqual((counts["attention"], counts["ready"], counts["reasons"]), (0, 0, {}))
+        self.assertIn("conflicts", "\n".join(ab.plain(l) for l in ab.compose(b, 110, 20)[0]))  # still shown on its row
 
     def test_stacked_prs_follow_their_parent_with_a_depth(self):
-        waiting = self.b.pr_groups()[2][2]
-        self.assertEqual([(p.number, d) for p, d in waiting], [(3, 0), (4, 1)])
+        b = board("mine", mine=[mine(3, decision="required", requested=("tom",)), mine(4, parent=3, depth=1, decision="required")])
+        self.assertEqual([(p.number, d) for p, d in b.pr_groups()[0][2]], [(3, 0), (4, 1)])
 
     def test_stacked_child_whose_parent_sits_elsewhere_is_not_indented(self):
         items = ab.order_stack([mine(10, merge="conflict"), mine(11, parent=10, depth=1, merge="clean")][1:])
@@ -266,7 +278,7 @@ class MyPullRequests(unittest.TestCase):
 
     def test_rows_show_reasons_project_and_age(self):
         text = "\n".join(ab.plain(l) for l in ab.compose(self.b, 120, 28)[0])
-        for needle in ("Needs attention", "conflicts", "changes requested", "checks failing", "draft", "billing-api", "1d"):
+        for needle in ("Needs attention", "conflicts", "changes requested", "checks failing", "Draft", "billing-api", "1d"):
             self.assertIn(needle, text)
 
     def test_a_waiting_pr_nobody_was_asked_to_review_says_so(self):

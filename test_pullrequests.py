@@ -51,12 +51,14 @@ class Classification(unittest.TestCase):
         self.assertEqual(mine(decision="approved").group, "ready")
         self.assertEqual(mine(decision="approved", merge="conflict").group, "attention")
         self.assertEqual(mine(decision="required").group, "waiting")
+        self.assertEqual(mine(draft=True).group, "draft")
+        self.assertEqual(mine(draft=True, merge="conflict", decision="approved").group, "draft")
 
     def test_waiting_notes(self):
         self.assertIn("nobody asked", mine().notes)
         self.assertNotIn("nobody asked", mine(requested=("maria",)).notes)
         self.assertNotIn("nobody asked", mine(draft=True).notes)
-        self.assertIn("draft", mine(draft=True).notes)
+        self.assertNotIn("draft", mine(draft=True).notes)  # the Draft section already says so
         self.assertIn("behind base", mine(decision="approved", merge="behind").notes)
 
 
