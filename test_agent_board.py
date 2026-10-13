@@ -990,14 +990,38 @@ class ClickToOpen(unittest.TestCase):
         ab.mouse_event(sel, self.b, y, x, curses.BUTTON1_PRESSED, lines)
         return ab.mouse_event(sel, self.b, y, x, curses.BUTTON1_RELEASED, lines)
 
-    def test_clicking_a_session_selects_it_and_queues_opening_it(self):
+    def double_click(self, y, x=5):
+        self.click(y, x)
+        return self.click(y, x)
+
+    def test_clicking_a_session_only_selects_it(self):
         self.assertIsNone(self.click(self.rows["id2"]))
+        self.assertEqual(self.b.sel, "id2")
+        self.assertIsNone(self.b.queued_effect)
+
+    def test_double_clicking_a_session_queues_opening_it(self):
+        self.assertIsNone(self.double_click(self.rows["id2"]))
         self.assertEqual(self.b.sel, "id2")
         self.assertEqual(self.b.queued_effect, ab.Effect("attach", session_id="id2"))
 
     def test_the_detail_line_of_a_session_opens_it_too(self):
+        self.click(self.rows["id1"])
         self.click(self.rows["id1"] + 1)
         self.assertEqual(self.b.queued_effect, ab.Effect("attach", session_id="id1"))
+
+    def test_two_slow_clicks_do_not_open_a_session(self):
+        clock = [ab.time.time()]
+        self.b.now = lambda: clock[0]
+        self.click(self.rows["id1"])
+        clock[0] += ab.DOUBLE_CLICK_SECONDS + 0.1
+        self.click(self.rows["id1"])
+        self.assertIsNone(self.b.queued_effect)
+
+    def test_clicks_on_two_different_sessions_open_neither(self):
+        self.click(self.rows["id1"])
+        self.click(self.rows["id2"])
+        self.assertEqual(self.b.sel, "id2")
+        self.assertIsNone(self.b.queued_effect)
 
     def test_clicking_a_group_header_or_empty_space_opens_nothing(self):
         self.click(ab.HEADER_ROWS)  # the first group header
@@ -1017,12 +1041,12 @@ class ClickToOpen(unittest.TestCase):
 
     def test_nothing_opens_while_a_popup_is_up(self):
         self.b.handle("ctrl+p")
-        self.click(self.rows["id1"])
+        self.double_click(self.rows["id1"])
         self.assertIsNone(self.b.queued_effect)
 
     def test_a_draft_in_the_prompt_is_kept_when_a_click_opens_a_session(self):
         self.b.handle("paste", "half written")
-        self.click(self.rows["id1"])
+        self.double_click(self.rows["id1"])
         self.assertEqual(self.b.input, "half written")
         self.assertEqual(self.b.queued_effect.kind, "attach")
 

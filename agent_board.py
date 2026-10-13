@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.11.1"
+__version__ = "0.12.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -515,6 +515,7 @@ def suggest_tags(prompt: str, meta: Meta) -> list[str]:
 
 USAGE_DAYS = 14
 RIGHT_MARGIN = 3
+DOUBLE_CLICK_SECONDS = 0.4  # a second click on the same session row this soon after the first opens it
 HEADER_ROWS = 4  # a padding row, the title bar, the pull-request strip and a spacer under it
 LIST_ROWS_BESIDE_LIMITS = 6  # a long list keeps at least this many rows when the LIMITS block is pinned under it
 LIST_ROWS_BESIDE_USAGE = 12  # ... and this many before the USAGE panel is pinned too
@@ -1087,7 +1088,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("home / end", "jump to the first / last session"),
         ("alt+↑ / alt+↓", "jump between groups"),
         ("alt+1 … alt+6", "open the Nth visible session"),
-        ("enter / → / click", "open the selected session (a draft in the prompt is kept)"),
+        ("enter / → / double-click", "open the selected session (a draft in the prompt is kept)"),
         ("space", "peek at the session's recent output"),
         ("ctrl+r", "rename the session right in its row (kept by the board only)"),
         ("ctrl+g", "tags: pick, create, rename, delete (ctrl+r / ctrl+x inside)"),
@@ -1107,7 +1108,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         *HELP_COMMON_END,
         ("ctrl+c", "clear the typed prompt, or close a popup; never quits"),
         ("esc", "leave the list, then clear the prompt or search, then quit"),
-        ("mouse", "click opens a session; drag selects text and copies it"),
+        ("mouse", "click selects a session, double-click opens it; drag selects text and copies it"),
     ],
     "review": [
         ("↑ / ↓", "move between pull requests"),
@@ -1209,6 +1210,7 @@ class Board:
         self.sessions_due = threading.Event()  # set to refresh the session list now instead of on the next tick
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
+        self.last_click: Optional[tuple[str, float]] = None  # (session id, when) of the last click on a session row
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
         self.pr_busy_keys: dict[str, str] = {}  # pull request key -> "approving…" while that runs in the background
         self.approved: set[str] = set()  # pull requests approved from the board: kept out of the queue even if a refresh still lists them
@@ -1973,7 +1975,9 @@ class Board:
         return Effect("browse", url=pr.url)
 
     def click(self, y: int, x: int = -1) -> None:
-        """A click on a row selects it and opens it, like Enter would; a click in the prompt moves its caret, one on a tab opens it."""
+        """A click on a pull request opens it, like Enter would; one on a session only selects it, a double-click opens it.
+        A click in the prompt moves its caret, one on a tab opens it."""
+        prev, self.last_click = self.last_click, None
         tab = next((t for ty, x0, x1, t in self.tab_hit if y == ty and x0 <= x < x1), None)
         if tab:
             self.set_tab(tab)
@@ -1993,7 +1997,11 @@ class Board:
                 self.queued_effect = self._enter_pr(pr)
         else:
             self.sel = owner
-            self.queued_effect = Effect("attach", session_id=owner)
+            now = self.now()
+            if prev and prev[0] == owner and now - prev[1] <= DOUBLE_CLICK_SECONDS:
+                self.queued_effect = Effect("attach", session_id=owner)
+            else:
+                self.last_click = (owner, now)
 
     def _jump_group(self, delta: int) -> None:
         groups = self.groups()
