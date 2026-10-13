@@ -277,8 +277,30 @@ class RenameInTheList(unittest.TestCase):
     def test_the_row_turns_into_the_edit_field_prefilled_with_the_current_name(self):
         lines, _ = self.screen()
         row = lines[self.row_of(lines, "beta")]
-        self.assertIn("edit", {style for _, style in row.segs})
-        self.assertIn("beta", ab.plain(row))
+        self.assertIn(("beta", "edit_sel"), row.segs)  # shown selected: typing replaces it
+        self.keys("end")
+        lines, _ = self.screen()
+        self.assertIn(("beta", "edit"), lines[self.row_of(lines, "beta")].segs)
+
+    def test_typing_replaces_the_whole_old_name(self):
+        self.keys("char:G", "char:o")
+        self.assertEqual(self.b.edit["text"], "Go")
+        self.keys("enter")
+        self.assertEqual(self.b.name_of(self.b.selected()), "Go")
+
+    def test_a_paste_replaces_the_whole_old_name(self):
+        self.b._handle_paste("pasted")
+        self.assertEqual((self.b.edit["text"], self.b.edit["cursor"]), ("pasted", 6))
+
+    def test_backspace_clears_the_selected_name_in_one_go(self):
+        self.keys("backspace")
+        self.assertEqual(self.b.edit["text"], "")
+
+    def test_a_caret_move_keeps_the_name_and_lets_go_of_the_selection(self):
+        self.keys("home", "char:X")
+        self.assertEqual(self.b.edit["text"], "Xbeta")
+        self.keys("esc", "ctrl+r", "right", "char:!")
+        self.assertEqual(self.b.edit["text"], "beta!")
 
     def test_the_bottom_prompt_is_untouched_and_no_rename_prompt_appears_there(self):
         lines, _ = self.screen()
@@ -300,7 +322,7 @@ class RenameInTheList(unittest.TestCase):
             self.b.handle("char", k[5:]) if k.startswith("char:") else self.b.handle(k)
 
     def test_the_caret_moves_and_typing_goes_in_where_it_is(self):
-        self.keys("left", "left", "char:X")  # be|ta
+        self.keys("end", "left", "left", "char:X")  # be|ta
         self.assertEqual(self.b.edit["text"], "beXta")
         self.keys("home", "char:[", "end", "char:]")
         self.assertEqual(self.b.edit["text"], "[beXta]")
@@ -325,7 +347,7 @@ class RenameInTheList(unittest.TestCase):
         self.assertEqual(self.b.edit["cursor"], 4)
 
     def test_the_screen_caret_follows_the_edit_caret(self):
-        self.keys("left", "left")
+        self.keys("end", "left", "left")
         lines, caret = self.screen()
         y = self.row_of(lines, "beta")
         self.assertEqual(caret, (y, ab.plain(lines[y]).index("beta") + 2))

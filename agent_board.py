@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1090,7 +1090,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("alt+1 … alt+6", "open the Nth visible session"),
         ("enter / → / double-click", "open the selected session (a draft in the prompt is kept)"),
         ("space", "peek at the session's recent output"),
-        ("ctrl+r", "rename the session right in its row (kept by the board only)"),
+        ("ctrl+r", "rename the session right in its row, typing replaces the selected old name (kept by the board only)"),
         ("ctrl+g", "tags: pick, create, rename, delete (ctrl+r / ctrl+x inside)"),
         ("ctrl+t", "pin the session to the top"),
         ("ctrl+x", "stop a working or idle session / delete a finished one (asks first: x or ctrl+x again confirms)"),
@@ -2167,6 +2167,8 @@ class Board:
                 self.tagpicker["idx"] = 0
         elif self.edit:
             e = self.edit
+            if e.pop("all", False):  # a paste replaces the selected old name, as typing does
+                e["text"], e["cursor"] = "", 0
             c = e.get("cursor", len(e["text"]))
             e["text"], e["cursor"] = e["text"][:c] + flat + e["text"][c:], c + len(flat)
             if self.edit["kind"] == "find":
@@ -2206,13 +2208,22 @@ class Board:
 
     def _handle_edit(self, key: str, ch: str) -> Optional[Effect]:
         e = self.edit
+        whole = e.pop("all", False)  # a rename opens with the old name selected; the first key replaces it or lets go of it
         if key == "esc":
             if e["kind"] == "find":
                 self.query = ""
             self.edit = None
         elif key == "enter":
             self._commit_edit()
+        elif whole and key in ("left", "home", "ctrl+left", "alt+left"):
+            e["cursor"] = 0
+        elif whole and key in ("right", "end", "ctrl+right", "alt+right"):
+            e["cursor"] = len(e["text"])
+        elif whole and key in ("backspace", "delete", "ctrl+w", "alt+backspace", "ctrl+delete", "ctrl+u"):
+            e["text"], e["cursor"] = "", 0
         else:
+            if whole and key in ("char", "space"):
+                e["text"], e["cursor"] = "", 0
             edited = edit_line(e["text"], e.get("cursor", len(e["text"])), key, ch)
             if edited:
                 e["text"], e["cursor"] = edited
@@ -2300,7 +2311,7 @@ class Board:
         elif key in ("ctrl+r", "ctrl+g", "ctrl+t", "ctrl+x") and not s:
             self.msg = "select a session first (↓)"
         elif key == "ctrl+r" and s:
-            self.edit = {"kind": "rename", "text": self.name_of(s), "sid": s.id, "cursor": len(self.name_of(s))}
+            self.edit = {"kind": "rename", "text": self.name_of(s), "sid": s.id, "cursor": len(self.name_of(s)), "all": True}
         elif key == "ctrl+g" and s:
             self.tagpicker = {"sid": s.id, "text": "", "idx": 0, "rename": None, "delete": None}
         elif key == "ctrl+t" and s:
@@ -2369,7 +2380,7 @@ def row_lines(board: Board, s: Session, width: int, selected: bool) -> list[Line
 
     if renaming:  # the name is edited right here in the list, so your eyes stay on the row
         room = max(8, width - seg_width(prefix) - 2 - seg_width(right) - 1)
-        shown, col, _ = prompt_window(renaming["text"], renaming.get("cursor", len(renaming["text"])), room, "edit")
+        shown, col, _ = prompt_window(renaming["text"], renaming.get("cursor", len(renaming["text"])), room, "edit_sel" if renaming.get("all") else "edit")
         left: list[Seg] = prefix + shown
         caret_x = seg_width(prefix) + col
     else:
@@ -3601,7 +3612,7 @@ def _theme() -> dict[str, tuple[int, int, int]]:
         "normal": (-1, -1, d), "bold": (-1, -1, b), "dim": (246, -1, d), "faint": (241, -1, d), "strip": (252, -1, d),
         "strip_bold": (255, -1, b),
         "rule": (238, -1, d), "accent": (209, -1, b), "head": (252, -1, b), "key": (215, -1, b),
-        "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b), "tab_on": (231, 24, b), "tab": (246, -1, d),
+        "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b), "edit_sel": (24, 231, b), "tab_on": (231, 24, b), "tab": (246, -1, d),
         "work": (215, -1, b), "wait": (221, -1, b), "done": (108, -1, d), "fail": (203, -1, b), "warn": (221, -1, b),
         "tag_review": (16, 183, d), "tag_ticket": (16, 117, d), "tag_pr": (16, 151, d), "tag_custom": (252, 238, d),
         "tag_adr": (16, 180, d), "tag_dr": (16, 224, d),

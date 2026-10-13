@@ -217,7 +217,7 @@ sudo apt install wl-clipboard   # Wayland
 | `/` | list slash commands and skills: `↑` `↓` choose, `tab` or `enter` completes |
 | `ctrl+p` · `ctrl+e` | choose the project · the model for new sessions |
 | `space` | peek at a session's recent output |
-| `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row) · tags · pin |
+| `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row, the old name selected so typing replaces it) · tags · pin |
 | `ctrl+x` | stop (working or idle) or delete (finished): asks first, `x` or `ctrl+x` again confirms |
 | `ctrl+s` | next view: status, project, review queue, my pull requests |
 | `ctrl+f` | find |
