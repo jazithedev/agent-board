@@ -376,6 +376,9 @@ class MergeFromMyPrs(unittest.TestCase):
                      "gh pr checks 2 --repo acme/billing-api --watch", "gh pr merge 2 --repo acme/billing-api --squash --delete-branch"):
             self.assertIn(part, prompt)
         self.assertIn("PR #2", prompt)  # names the PR, so the row shows the ⟳ link while it works
+        for part in ("remove every git worktree that has `BI-2-behind` checked out", "delete the local branch `BI-2-behind`",
+                     "delete `BI-2-behind` on origin", "git fetch --prune", "git worktree prune", "Leave every other branch and worktree alone"):
+            self.assertIn(part, prompt)  # once merged, it cleans up after itself
         self.assertIn("once its checks pass", self.b.msg)
 
     def test_a_direct_merge_reports_and_asks_for_a_refresh(self):

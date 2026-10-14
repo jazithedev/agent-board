@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -375,7 +375,13 @@ MERGE_PROMPT = (
     "Work in a new git worktree so the main checkout stays untouched. Fetch origin and check out `{head}`; if it is behind "
     "`origin/{base}`, merge `origin/{base}` into it and push the branch: a normal push, never a force push. If that merge has "
     "conflicts, stop and ask me. Then wait for every check on the {kind} to finish ({watch}). If any fails, stop and tell me "
-    "which one and why, without merging. When all of them pass, merge it with `{merge}` and confirm it was merged."
+    "which one and why, without merging. When all of them pass, merge it with `{merge}` and confirm it was merged. "
+    "Once it is merged, clean up after it from the project's main checkout: remove every git worktree that has `{head}` checked out, "
+    "the one you made included; delete the local branch `{head}`; delete `{head}` on origin if it is still there; then run "
+    "`git fetch --prune` and `git worktree prune` so stale remote-tracking branches and worktree entries go too. A squash or rebase "
+    "merge leaves the branch looking unmerged to git, so before forcing a delete check that its tip is the head commit the {kind} "
+    "was merged with. Keep and tell me about any worktree with uncommitted changes and any branch with commits that were not "
+    "part of the {kind}. Leave every other branch and worktree alone."
 )
 MERGE_KEYS = {"s": "squash", "m": "merge", "r": "rebase"}
 DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading each one and its diff with glab: {urls}"
