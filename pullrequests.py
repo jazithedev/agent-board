@@ -148,6 +148,7 @@ class ReviewPr:
     created_at: float = 0.0
     updated_at: float = 0.0
     flags: tuple[str, ...] = ()  # new | re-requested | teammate-changes-requested | teammate-approved
+    approved_by_me: bool = False  # your latest review is an approval that still stands
 
     @property
     def key(self) -> str:
@@ -156,6 +157,11 @@ class ReviewPr:
     @property
     def repo_key(self) -> str:
         return f"{self.provider}:{self.repo.lower()}"
+
+    @property
+    def collective(self) -> bool:
+        """The collective PR of a stack: it only gathers PRs that were reviewed one by one."""
+        return "[collective]" in self.title.lower()
 
 
 @dataclass
@@ -249,6 +255,7 @@ def github_review_pr(node: dict, me: str) -> ReviewPr:
         provider="github", repo=(node.get("repository") or {}).get("nameWithOwner", ""), number=int(node["number"]),
         title=node.get("title") or "", url=node.get("url", ""), author=_login(node.get("author")), draft=bool(node.get("isDraft")),
         created_at=parse_time(node.get("createdAt")), updated_at=parse_time(node.get("updatedAt")), flags=review_flags(node, me),
+        approved_by_me=_reviews(node).get(me) == "APPROVED",
     )
 
 

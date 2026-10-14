@@ -328,3 +328,10 @@ class MergeCommand(unittest.TestCase):
     def test_merge_reports_the_first_line_of_a_failure(self):
         run = lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="X Pull request is not mergeable\nmore")
         self.assertEqual(pr.merge(pr.MyPr("github", "a/b", 1, "t", "u"), "merge", run), "X Pull request is not mergeable")
+
+
+class ApprovedByMe(unittest.TestCase):
+    def test_your_standing_approval_is_read_from_your_latest_review(self):
+        self.assertTrue(pr.github_review_pr(review_node("o/r", 1, reviews={"me": "APPROVED"}), "me").approved_by_me)
+        self.assertFalse(pr.github_review_pr(review_node("o/r", 2, reviews={"me": "DISMISSED", "tom": "APPROVED"}), "me").approved_by_me)
+        self.assertFalse(pr.github_review_pr(review_node("o/r", 3), "me").approved_by_me)

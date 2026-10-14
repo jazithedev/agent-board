@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1230,6 +1230,7 @@ class Board:
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
         self.pr_busy_keys: dict[str, str] = {}  # pull request key -> "approving…" while that runs in the background
         self.approved: set[str] = set()  # pull requests approved from the board: kept out of the queue even if a refresh still lists them
+        self.auto_tried: set[str] = set()  # [Collective] PRs already sent for automatic approval: one try each, so a failure is not retried every refresh
         self.slash_catalog = slash.Catalog()
         self.slash_state: dict = {"query": None, "idx": 0}
         self.workers: list[threading.Thread] = []
@@ -1777,6 +1778,12 @@ class Board:
 
     def hidden_by_age(self) -> int:
         return len(self.prs.review) - len(self.review_prs()) if self.prs else 0
+
+    def collectives_to_approve(self) -> list:
+        """[Collective] PRs in the review queue that do not have your approval yet and were not tried before."""
+        if not self.prs:
+            return []
+        return [p for p in self.prs.review if p.collective and not p.approved_by_me and p.key not in self.approved | self.auto_tried | set(self.pr_busy_keys)]
 
     def without_approved(self, data: "prs.PrData") -> "prs.PrData":
         data.review = [p for p in data.review if p.key not in self.approved]
@@ -3989,6 +3996,9 @@ class PrLoader(threading.Thread):
         try:
             board.prs = board.without_approved(prs.fetch_all(self.projects(), dict(board.meta.settings), self.run_, time.time()))
             outcome = self.outcome(board)
+            for pr in board.collectives_to_approve():  # a collective PR only gathers reviewed ones: approve it without asking
+                board.auto_tried.add(pr.key)
+                start_approval(board, pr, auto=True)
         except Exception as exc:  # keep the board alive and say what went wrong
             board.prs = prs.PrData(errors=[f"refresh failed: {exc}"], fetched_at=time.time())
             outcome = f"✗ refresh failed: {exc}"
@@ -4156,11 +4166,11 @@ def run_session_action(board: Board, effect: Effect) -> None:
     board.set_sessions(load_sessions())
 
 
-def run_approval(board: Board, pr, run=subprocess.run) -> None:
+def run_approval(board: Board, pr, run=subprocess.run, auto: bool = False) -> None:
     """Approves the PR (blocking: this is the slow part); once it worked the PR leaves the review queue."""
     reason = prs.approve(pr, run)
     if reason:
-        board.msg = f"✗ could not approve #{pr.number}: {reason}"
+        board.msg = f"✗ could not {'auto-approve' if auto else 'approve'} #{pr.number}: {reason}"
         return
     flat = [p.key for p in board.pr_flat()]
     if board.pr_sel == pr.key:  # the selection moves on to the next PR, as after a delete
@@ -4171,16 +4181,16 @@ def run_approval(board: Board, pr, run=subprocess.run) -> None:
     board.marked.discard(pr.key)
     if board.prs:
         board.without_approved(board.prs)
-    board.msg = f"✓ approved #{pr.number} “{pr.title}”"
+    board.msg = f"✓ {'auto-approved' if auto else 'approved'} #{pr.number} “{pr.title}”"
 
 
-def start_approval(board: Board, pr) -> threading.Thread:
+def start_approval(board: Board, pr, auto: bool = False) -> threading.Thread:
     """Runs the approval in the background so the board keeps drawing; the row says what is going on."""
     board.pr_busy_keys[pr.key] = "approving…"
 
     def work() -> None:
         try:
-            run_approval(board, pr)
+            run_approval(board, pr, auto=auto)
         finally:
             board.pr_busy_keys.pop(pr.key, None)
 

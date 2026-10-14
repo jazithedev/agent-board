@@ -582,6 +582,39 @@ class Loader(unittest.TestCase):
         self.assertFalse(b.pr_busy)
 
 
+class CollectiveAutoApproval(unittest.TestCase):
+    """A [Collective] PR only gathers PRs reviewed one by one, so each load approves it without asking."""
+
+    def collective(self, n, **kw):
+        return prs.ReviewPr("github", "acme/billing-api", n, f"[Collective] BI-4978 email campaigns {n}", f"https://example.com/acme/billing-api/pull/{n}", "maria", **kw)
+
+    def test_only_unapproved_collectives_are_picked_whatever_the_case(self):
+        b = board("review", review=[
+            self.collective(1), self.collective(2, approved_by_me=True), review(3),
+            prs.ReviewPr("github", "acme/billing-api", 4, "[COLLECTIVE] shout", "u", "tom"),
+        ])
+        self.assertEqual([p.number for p in b.collectives_to_approve()], [1, 4])
+
+    def test_a_refresh_approves_each_collective_once_even_if_it_failed(self):
+        b = board("review")
+        b.set_sessions([session(1)])
+        started = []
+        data = prs.PrData(review=[self.collective(7), review(8)], fetched_at=NOW)
+        loader = ab.PrLoader(b, run=RefreshMessage.quiet_world)
+        with mock.patch.object(ab.prs, "fetch_all", lambda *a, **k: data), \
+                mock.patch.object(ab, "start_approval", lambda board, pr, auto=False: started.append((pr.number, auto))):
+            loader.refresh()
+            loader.refresh()  # still listed (say the approval failed): not tried again
+        self.assertEqual(started, [(7, True)])
+
+    def test_the_outcome_says_it_was_automatic(self):
+        b = board("review", review=[self.collective(9)])
+        ab.run_approval(b, b.prs.review[0], lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""), auto=True)
+        self.assertIn("✓ auto-approved #9", b.msg)
+        ab.run_approval(b, self.collective(10), lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="nope"), auto=True)
+        self.assertEqual(b.msg, "✗ could not auto-approve #10: nope")
+
+
 class RefreshMessage(unittest.TestCase):
     """ctrl+l says "refreshing…"; that note must give way to the outcome instead of staying on screen."""
 
