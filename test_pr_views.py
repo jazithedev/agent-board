@@ -303,6 +303,90 @@ class MyPullRequests(unittest.TestCase):
         self.assertEqual(b.queued_effect, ab.Effect("attach", session_id="s1"))
 
 
+class MergeFromMyPrs(unittest.TestCase):
+    """m on one of your PRs merges it: now when it is up to date and green, else through a session that updates it first."""
+
+    def setUp(self):
+        self.b = board("mine", mine=[
+            mine(1, decision="approved", checks="pass", head="ready-one", base="main"),
+            mine(2, decision="approved", merge="behind", checks="pass", head="BI-2-behind", base="main"),
+            mine(3, decision="approved", checks="pending"),
+            mine(4, merge="conflict"), mine(5, checks="fail"), mine(6, draft=True),
+        ])
+
+    def on(self, n):
+        self.b.pr_sel = next(p.key for p in self.b.pr_flat() if p.number == n)
+
+    def test_m_asks_for_the_method_and_s_merges_an_up_to_date_pr_right_away(self):
+        self.on(1)
+        self.assertIsNone(self.b.handle("char", "m"))
+        hint = ab.plain(ab.Line(ab._hint_segs(self.b)))
+        self.assertIn("Merge #1", hint)
+        self.assertIn("s squash · m merge commit · r rebase", hint)
+        effect = self.b.handle("char", "s")
+        self.assertEqual((effect.kind, effect.items[0].number, effect.text), ("merge", 1, "squash"))
+
+    def test_m_and_r_choose_a_merge_commit_or_a_rebase(self):
+        for key, method in (("m", "merge"), ("r", "rebase")):
+            self.on(1)
+            self.b.handle("char", "m")
+            self.assertEqual(self.b.handle("char", key).text, method)
+
+    def test_any_other_key_cancels(self):
+        self.on(1)
+        self.b.handle("char", "m")
+        self.assertIsNone(self.b.handle("enter"))
+        self.assertEqual(self.b.msg, "cancelled")
+
+    def test_a_pr_behind_its_base_or_with_checks_running_goes_to_a_session(self):
+        for n in (2, 3):
+            self.on(n)
+            self.b.handle("char", "m")
+            self.assertIn("updated first", ab.plain(ab.Line(ab._hint_segs(self.b))))
+            effect = self.b.handle("char", "s")
+            self.assertEqual((effect.kind, effect.items[0].number), ("merge_session", n))
+
+    def test_conflicts_failing_checks_and_drafts_are_refused_with_the_reason(self):
+        for n, reason in ((4, "f fixes them first"), (5, "failing checks"), (6, "is a draft")):
+            self.on(n)
+            self.assertIsNone(self.b.handle("char", "m"))
+            self.assertIsNone(self.b.confirm)
+            self.assertIn(reason, self.b.msg)
+
+    def test_m_does_nothing_in_the_review_queue(self):
+        b = board("review", review=[review(5)])
+        b.pr_sel = b.pr_flat()[0].key
+        b.handle("char", "m")
+        self.assertIsNone(b.confirm)
+
+    def test_the_session_updates_the_branch_waits_for_checks_and_merges(self):
+        calls = []
+
+        def fake_cli(args, cwd=None, timeout=60):
+            calls.append((args, cwd))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        pr = next(p for p in self.b.prs.mine if p.number == 2)
+        with mock.patch.object(ab, "run_cli", fake_cli), mock.patch.object(ab, "load_sessions", lambda: []):
+            ab.start_merge_session(self.b, pr, "squash")
+        [(args, cwd)] = calls
+        self.assertEqual(cwd, "/srv/www/billing-api")
+        prompt = args[-1]
+        for part in ("PR #2", "`BI-2-behind`", "origin/main", "never a force push", "worktree",
+                     "gh pr checks 2 --repo acme/billing-api --watch", "gh pr merge 2 --repo acme/billing-api --squash --delete-branch"):
+            self.assertIn(part, prompt)
+        self.assertIn("PR #2", prompt)  # names the PR, so the row shows the ⟳ link while it works
+        self.assertIn("once its checks pass", self.b.msg)
+
+    def test_a_direct_merge_reports_and_asks_for_a_refresh(self):
+        pr = next(p for p in self.b.prs.mine if p.number == 1)
+        ab.run_merge(self.b, pr, "rebase", lambda *a, **k: mock.Mock(returncode=0, stdout="", stderr=""))
+        self.assertIn("✓ merged #1", self.b.msg)
+        self.assertTrue(self.b.refresh_requested.is_set())
+        ab.run_merge(self.b, pr, "rebase", lambda *a, **k: mock.Mock(returncode=1, stdout="", stderr="Pull request is not mergeable"))
+        self.assertEqual(self.b.msg, "✗ could not merge #1: Pull request is not mergeable")
+
+
 class FixConflicts(unittest.TestCase):
     """f on one of your PRs with conflicts starts a background session that resolves them."""
 

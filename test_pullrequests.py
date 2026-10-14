@@ -312,3 +312,19 @@ class Approving(unittest.TestCase):
             raise FileNotFoundError(cmd[0])
 
         self.assertEqual(pr.approve(pr.ReviewPr("github", "a/b", 1, "t", "u"), run), "gh is not installed")
+
+
+class MergeCommand(unittest.TestCase):
+    def test_github_uses_the_chosen_method_and_deletes_the_branch(self):
+        p = pr.MyPr("github", "acme/api", 7, "t", "u")
+        self.assertEqual(pr.merge_command(p, "squash"), ["gh", "pr", "merge", "7", "--repo", "acme/api", "--squash", "--delete-branch"])
+
+    def test_gitlab_squashes_or_rebases_by_flag_and_removes_the_source_branch(self):
+        p = pr.MyPr("gitlab", "g/p", 3, "t", "u")
+        self.assertEqual(pr.merge_command(p, "squash")[-2:], ["--remove-source-branch", "--squash"])
+        self.assertEqual(pr.merge_command(p, "rebase")[-1], "--rebase")
+        self.assertEqual(pr.merge_command(p, "merge")[-1], "--remove-source-branch")
+
+    def test_merge_reports_the_first_line_of_a_failure(self):
+        run = lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="X Pull request is not mergeable\nmore")
+        self.assertEqual(pr.merge(pr.MyPr("github", "a/b", 1, "t", "u"), "merge", run), "X Pull request is not mergeable")

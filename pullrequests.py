@@ -416,6 +416,31 @@ def approve(pr: ReviewPr, run: Runner = subprocess.run) -> Optional[str]:
     return next((l.strip() for l in (proc.stderr + "\n" + proc.stdout).splitlines() if l.strip()), "failed")[:200]
 
 
+MERGE_METHODS = ("squash", "merge", "rebase")
+
+
+def merge_command(pr: MyPr, method: str) -> list[str]:
+    """The gh / glab command that merges the pull request with `method` and deletes its branch on the remote."""
+    if pr.provider == "gitlab":
+        cmd = ["glab", "mr", "merge", str(pr.number), "--repo", f"https://{GITLAB_HOST}/{pr.repo}", "--yes", "--remove-source-branch"]
+        return cmd + ({"squash": ["--squash"], "rebase": ["--rebase"]}.get(method, []))
+    return ["gh", "pr", "merge", str(pr.number), "--repo", pr.repo, f"--{method}", "--delete-branch"]
+
+
+def merge(pr: MyPr, method: str, run: Runner = subprocess.run) -> Optional[str]:
+    """Merges a pull request now; None when it worked, else the reason it did not."""
+    cmd = merge_command(pr, method)
+    try:
+        proc = run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return f"{cmd[0]} is not installed"
+    except subprocess.SubprocessError as exc:
+        return f"{cmd[0]} did not finish: {exc}"
+    if proc.returncode == 0:
+        return None
+    return next((l.strip() for l in (proc.stderr + "\n" + proc.stdout).splitlines() if l.strip()), "failed")[:200]
+
+
 def fetch_all(
     projects: dict[str, Remote], settings: dict, run: Runner, now: float, home: str = str(Path.home()), sleep: Callable[[float], None] = time.sleep
 ) -> PrData:

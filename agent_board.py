@@ -20,6 +20,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import shutil
 import signal
 import struct
@@ -37,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -369,6 +370,14 @@ CONFLICT_PROMPT = (
     "and resolve every conflict, keeping what both sides meant. Run the tests that cover the files you touched, commit the merge "
     "and push the branch: a normal push, never a force push. If a conflict is ambiguous, stop and ask me instead of guessing."
 )
+MERGE_PROMPT = (
+    "Merge {kind} {ref} ({url}) into `{base}` once it is up to date with `{base}` and every pipeline on it has passed. "
+    "Work in a new git worktree so the main checkout stays untouched. Fetch origin and check out `{head}`; if it is behind "
+    "`origin/{base}`, merge `origin/{base}` into it and push the branch: a normal push, never a force push. If that merge has "
+    "conflicts, stop and ask me. Then wait for every check on the {kind} to finish ({watch}). If any fails, stop and tell me "
+    "which one and why, without merging. When all of them pass, merge it with `{merge}` and confirm it was merged."
+)
+MERGE_KEYS = {"s": "squash", "m": "merge", "r": "rebase"}
 DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading each one and its diff with glab: {urls}"
 VIEW_ORDER = ("status", "project", "review", "mine")
 PR_VIEWS = ("review", "mine")
@@ -1130,6 +1139,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("enter / click", "jump to a session already on that PR (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
         ("f", "fix conflicts: a background session merges the base into the branch, resolves them and pushes"),
+        ("m", "merge, choosing squash, merge commit or rebase; a PR behind its base is updated first and merged once its checks pass"),
         ("ctrl+f", "filter pull requests"),
         *HELP_COMMON_END,
         ("esc", "clear the filter, then back to the session list"),
@@ -1932,6 +1942,12 @@ class Board:
             if p.merge == "conflict":
                 return Effect("fix_conflicts", items=[p])
             self.msg = f"{pr_ref(p)} has no conflicts to fix"
+        elif key == "char" and ch == "m" and self.mode == "mine" and p:
+            refusal = self._merge_refusal(p)
+            if refusal:
+                self.msg = refusal
+            else:
+                self.confirm = {"kind": "merge", "pr": p.key}
         elif key == "char" and ch == "o" and p:
             return Effect("browse", url=p.url)
         elif key in ("enter", "right") and p:
@@ -2183,8 +2199,29 @@ class Board:
                 self._insert(text)
         return None
 
+    def _merge_refusal(self, pr) -> str:
+        """Why m will not merge this PR, or "" when it can go ahead."""
+        if pr.key in self.pr_busy_keys:
+            return f"{pr_ref(pr)} is {self.pr_busy_keys[pr.key]}"
+        if pr.draft:
+            return f"{pr_ref(pr)} is a draft: mark it ready for review first"
+        if pr.merge == "conflict":
+            return f"{pr_ref(pr)} has conflicts: f fixes them first"
+        if pr.checks == "fail" and not pr.checks_stale:
+            return f"{pr_ref(pr)} has failing checks"
+        return ""
+
     def _handle_confirm(self, key: str, ch: str) -> Optional[Effect]:
         c, self.confirm = self.confirm, None
+        if c["kind"] == "merge":
+            pr = next((x for x in self.pr_flat() if x.key == c["pr"]), None)
+            method = MERGE_KEYS.get(ch.lower()) if key == "char" else None
+            if pr and method:
+                # behind its base or checks still running: a session updates it and merges once everything is green
+                waits = pr.merge == "behind" or pr.checks == "pending" or (pr.checks == "fail" and pr.checks_stale)
+                return Effect("merge_session" if waits else "merge", items=[pr], text=method)
+            self.msg = "cancelled"
+            return None
         if c["kind"] == "approve":
             pr = next((x for x in self.pr_flat() if x.key == c["pr"]), None)
             if pr and (key == "enter" or (key == "char" and ch.lower() == "a")):
@@ -3040,6 +3077,12 @@ def _hint_segs(board: Board) -> list[Seg]:
         where = "GitLab" if pr and pr.provider == "gitlab" else "GitHub"
         what = f"Approve #{pr.number} “{pr.title}” on {where}?" if pr else "Approve?"
         return [(" ", "normal"), (what, "warn"), ("  a or enter approves · any other key cancels", "faint")]
+    if board.confirm and board.confirm["kind"] == "merge":
+        pr = next((x for x in board.pr_flat() if x.key == board.confirm["pr"]), None)
+        what = f"Merge {pr_ref(pr)} “{pr.title}”?" if pr else "Merge?"
+        if pr and (pr.merge == "behind" or pr.checks == "pending"):
+            what += " It is updated first and merged once its checks pass."
+        return [(" ", "normal"), (what, "warn"), ("  s squash · m merge commit · r rebase · any other key cancels", "faint")]
     if board.confirm:
         s = next((x for x in board.sessions if x.id == board.confirm["sid"]), None)
         verb = "Stop" if board.confirm["kind"] == "stop" else "Delete"
@@ -4035,6 +4078,55 @@ def start_conflict_session(board: Board, pr) -> None:
     board.set_sessions(load_sessions())
 
 
+def merge_prompt(pr, method: str) -> str:
+    gitlab = pr.provider == "gitlab"
+    watch = f"glab ci status --live --branch {pr.head}" if gitlab and pr.head else ("glab ci status --live" if gitlab else f"gh pr checks {pr.number} --repo {pr.repo} --watch")
+    return MERGE_PROMPT.format(
+        kind="MR" if gitlab else "PR", ref=pr_ref(pr), url=pr.url, head=pr.head or "the PR branch", base=pr.base or "the base branch",
+        watch=watch, merge=shlex.join(prs.merge_command(pr, method)),
+    )
+
+
+def start_merge_session(board: Board, pr, method: str) -> None:
+    """A background session in the PR's project that brings the branch up to date, waits for green checks and merges."""
+    name, path = board.pr_project(pr)
+    try:
+        r = run_cli(bg_command(merge_prompt(pr, method), board.model()), cwd=path or None)
+    except (OSError, subprocess.SubprocessError) as exc:
+        board.msg = f"✗ could not start merging {pr_ref(pr)}: {exc}"
+        return
+    if r.returncode == 0:
+        board.msg = f"✓ {pr_ref(pr)} is updated and merged ({method}) once its checks pass, by a session in {name}: a ⟳ marks the PR meanwhile"
+    else:
+        board.msg = f"✗ could not start merging {pr_ref(pr)}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
+    board.set_sessions(load_sessions())
+
+
+def run_merge(board: Board, pr, method: str, run=subprocess.run) -> None:
+    """Merges the PR now (blocking: this is the slow part), then asks for a refresh so it leaves My PRs."""
+    reason = prs.merge(pr, method, run)
+    if reason:
+        board.msg = f"✗ could not merge {pr_ref(pr)}: {reason}"
+        return
+    board.msg = f"✓ merged {pr_ref(pr)} “{pr.title}” ({method}) and deleted its branch"
+    board.refresh_requested.set()
+
+
+def start_merge(board: Board, pr, method: str) -> threading.Thread:
+    """Runs the merge in the background so the board keeps drawing; the row says what is going on."""
+    board.pr_busy_keys[pr.key] = "merging…"
+
+    def work() -> None:
+        try:
+            run_merge(board, pr, method)
+        finally:
+            board.pr_busy_keys.pop(pr.key, None)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    return t
+
+
 ACTION_LABEL = {"stop": "stopping…", "remove": "removing…"}
 
 
@@ -4178,6 +4270,12 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         return True
     if effect.kind == "approve":
         start_approval(board, effect.items[0])
+        return True
+    if effect.kind == "merge":
+        start_merge(board, effect.items[0], effect.text)
+        return True
+    if effect.kind == "merge_session":
+        start_merge_session(board, effect.items[0], effect.text)
         return True
     if effect.kind == "attach":
         curses.def_prog_mode()  # remember the board's terminal settings
