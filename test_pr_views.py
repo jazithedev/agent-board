@@ -381,6 +381,20 @@ class MergeFromMyPrs(unittest.TestCase):
             self.assertIn(part, prompt)  # once merged, it cleans up after itself
         self.assertIn("once its checks pass", self.b.msg)
 
+    def test_a_merge_session_is_tagged_merging_first_and_still_linked_to_its_pr(self):
+        pr = next(p for p in self.b.prs.mine if p.number == 2)
+        tags = ab.derive_tags(ab.merge_prompt(pr, "squash"))
+        self.assertEqual(tags[0], ab.Tag("Merging: #2", "merging"))
+        self.assertIn(ab.Tag("PR #2", "pr"), tags)  # the ⟳ on the PR row still finds the session
+        gitlab = mine(5, repo="scum-map/scum-map", provider="gitlab", head="b5", base="main")
+        self.assertEqual(ab.derive_tags(ab.merge_prompt(gitlab, "merge"))[0], ab.Tag("Merging: !5", "merging"))
+
+    def test_only_a_merge_prompt_gives_the_merging_tag(self):
+        for text in ("merge PR #12 into main please", "Fix the merge of PR #12", "review PR #12 (https://example.com/x/pull/12)"):
+            self.assertNotIn("merging", {t.kind for t in ab.derive_tags(text)})
+        self.assertEqual(ab.tag_kind("Merging: #9"), "merging")
+        self.assertEqual(ab.merge_tags([ab.Tag("Merging: #9", "merging")], []), [ab.Tag("Merging: #9", "merging")])  # remembered once seen
+
     def test_a_direct_merge_reports_and_asks_for_a_refresh(self):
         pr = next(p for p in self.b.prs.mine if p.number == 1)
         ab.run_merge(self.b, pr, "rebase", lambda *a, **k: mock.Mock(returncode=0, stdout="", stderr=""))

@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -62,6 +62,7 @@ PR_RE = re.compile(
     r"|(?<![\w/])!(\d{2,5})\b",
     re.IGNORECASE,
 )
+MERGING_RE = re.compile(r"\bMerge (PR #|MR !)(\d+) \(")  # how MERGE_PROMPT opens: the session merging that PR
 REVIEW_RE = re.compile(
     r"\bcode[- ]review\b|\breview(?:ing)?\s+(?:the\s+|this\s+|my\s+)?(?:pr|mr|pull|merge|code|changes|diff)\b"
     r"|/code-review",
@@ -75,12 +76,12 @@ class Tag:
     kind: str  # review | ticket | pr | custom
 
 
-TAG_LIMITS = {"review": 1, "ticket": 2, "adr": 2, "dr": 2, "pr": 2}
-TAG_ORDER = {"review": 0, "ticket": 1, "adr": 2, "dr": 3, "pr": 4}
+TAG_LIMITS = {"merging": 1, "review": 1, "ticket": 2, "adr": 2, "dr": 2, "pr": 2}
+TAG_ORDER = {"merging": -1, "review": 0, "ticket": 1, "adr": 2, "dr": 3, "pr": 4}
 ADR_RE = re.compile(r"\b(ADR-\d{3,6})\b")  # padded, as ADR series are: ADR-001, ADR-0020
 # a product Decision Record: DR #1, DR#1, "RM DR#1" (RM's first) or "DR: LRT#2"
 DR_RE = re.compile(r"(?:\b([A-Z]{2,5})\s+)?\bDR(?::\s*|\s*)([A-Z]{2,5})?\s?#(\d+)\b")
-TAG_PREFIX = {"Ticket: ": "ticket", "ADR: ": "adr", "DR: ": "dr", "PR #": "pr"}
+TAG_PREFIX = {"Ticket: ": "ticket", "ADR: ": "adr", "DR: ": "dr", "PR #": "pr", "Merging: ": "merging"}
 
 
 def is_adr_key(key: str) -> bool:
@@ -117,6 +118,9 @@ def merge_tags(kept: list[Tag], found: list[Tag]) -> list[Tag]:
 def derive_tags(*sources: str) -> list[Tag]:
     text = "\n".join(s for s in sources if s)
     tags: list[Tag] = []
+    merging = MERGING_RE.search(text)
+    if merging:
+        tags.append(Tag(f"Merging: {merging.group(1)[-1]}{merging.group(2)}", "merging"))
     if REVIEW_RE.search(text):
         tags.append(Tag("Code Review", "review"))
     tickets: list[str] = []
@@ -3670,7 +3674,7 @@ def _theme() -> dict[str, tuple[int, int, int]]:
         "rule": (238, -1, d), "accent": (209, -1, b), "head": (252, -1, b), "key": (215, -1, b),
         "name": (255, -1, b), "name_sel": (231, -1, b), "edit": (231, 24, b), "edit_sel": (24, 231, b), "tab_on": (231, 24, b), "tab": (246, -1, d),
         "work": (215, -1, b), "wait": (221, -1, b), "done": (108, -1, d), "fail": (203, -1, b), "warn": (221, -1, b),
-        "tag_review": (16, 183, d), "tag_ticket": (16, 117, d), "tag_pr": (16, 151, d), "tag_custom": (252, 238, d),
+        "tag_review": (16, 183, d), "tag_merging": (16, 216, d), "tag_ticket": (16, 117, d), "tag_pr": (16, 151, d), "tag_custom": (252, 238, d),
         "tag_adr": (16, 180, d), "tag_dr": (16, 224, d),
     }
     for i, c in enumerate([75, 176, 114, 215, 141, 80]):
