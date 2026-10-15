@@ -263,8 +263,16 @@ def github_review_pr(node: dict, me: str) -> ReviewPr:
         title=node.get("title") or "", url=node.get("url", ""), author=_login(node.get("author")), draft=bool(node.get("isDraft")),
         created_at=parse_time(node.get("createdAt")), updated_at=parse_time(node.get("updatedAt")), flags=review_flags(node, me),
         approved_by_me=_reviews(node).get(me) == "APPROVED", head_sha=node.get("headRefOid") or "",
-        approved_before=any(_login(n.get("author")) == me for n in _nodes(node.get("approvals"))) if me else False,
+        approved_before=bool(me) and me in approvers(node),
     )
+
+
+def approvers(node: dict) -> set[str]:
+    """Everyone who ever approved: standing approvals, and those dismissed later, which GitHub turns into DISMISSED reviews
+    and only the dismissal event still remembers as approvals."""
+    found = {_login(n.get("author")) for n in _nodes(node.get("approvals"))}
+    found |= {_login((n.get("review") or {}).get("author")) for n in _nodes(node.get("dismissals")) if n.get("previousReviewState") == "APPROVED"}
+    return found - {""}
 
 
 def gitlab_repo_of(mr: dict) -> str:
@@ -356,7 +364,9 @@ GITHUB_QUERY = f"""query {{
   review: search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 100) {{
     nodes {{ ... on PullRequest {{ {_PR_FIELDS} headRefOid
       {_PEOPLE}
-      approvals: reviews(states: APPROVED, last: 50) {{ nodes {{ author {{ login }} }} }} }} }}
+      approvals: reviews(states: APPROVED, last: 50) {{ nodes {{ author {{ login }} }} }}
+      dismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], last: 50) {{
+        nodes {{ ... on ReviewDismissedEvent {{ previousReviewState review {{ author {{ login }} }} }} }} }} }} }}
   }}
 }}"""
 MERGE_TRIES = 3  # GitHub works merge states out lazily: a cold query reports UNKNOWN, the next one the real value

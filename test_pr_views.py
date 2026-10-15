@@ -486,8 +486,19 @@ class Settings(unittest.TestCase):
         self.b.handle("space")
         self.assertNotIn("include_drafts", self.b.meta.settings)
 
-    def test_review_command_can_be_edited_and_reset(self):
+    def test_auto_re_review_is_on_until_turned_off_and_that_survives_a_restart(self):
+        self.assertTrue(self.b.auto_rereview())
         for _ in range(3):
+            self.b.handle("down")
+        self.assertIn("[x] on", "\n".join(ab.plain(l) for l in ab.compose(self.b, 110, 30)[0]))
+        self.b.handle("space")
+        self.assertFalse(ab.Meta(self.b.meta.path).settings["auto_rereview"])
+        self.assertIn("[ ] off", "\n".join(ab.plain(l) for l in ab.compose(self.b, 110, 30)[0]))
+        self.b.handle("space")
+        self.assertNotIn("auto_rereview", self.b.meta.settings)
+
+    def test_review_command_can_be_edited_and_reset(self):
+        for _ in range(4):
             self.b.handle("down")
         self.b.handle("enter")
         self.b.handle("ctrl+u")
@@ -501,7 +512,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "drafts", "age", "review_cmd", "review_cmd_gl"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl"])
 
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
@@ -641,6 +652,11 @@ class AutoReReview(unittest.TestCase):
             prs.ReviewPr("github", "acme/billing-api", 5, "[Collective] stack", "u", "tom", approved_before=True, head_sha="s"),
         ])
         self.assertEqual([p.number for p in b.reapprovals_to_review()], [1, 3])
+
+    def test_nothing_is_picked_while_the_setting_is_off(self):
+        b = board("review", review=[self.again(1)])
+        b.meta.set_setting("auto_rereview", False)
+        self.assertEqual(b.reapprovals_to_review(), [])
 
     def test_one_session_per_head_commit_remembered_across_restarts(self):
         b = board("review")

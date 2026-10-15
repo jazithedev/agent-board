@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1105,7 +1105,7 @@ HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
     ("ctrl+s", "next tab, round and round"),
     ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+o", "settings: PR refresh interval, drafts, review queue age, review command"),
+    ("ctrl+o", "settings: PR refresh interval, drafts, review queue age, auto re-review, review command"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1796,9 +1796,12 @@ class Board:
             return []
         return [p for p in self.prs.review if p.collective and not p.approved_by_me and p.key not in self.approved | self.auto_tried | set(self.pr_busy_keys)]
 
+    def auto_rereview(self) -> bool:
+        return self.meta.settings.get("auto_rereview", True) is not False
+
     def reapprovals_to_review(self) -> list:
         """PRs you approved before that ask for your approval again, at a head commit no session was started for yet."""
-        if not self.prs:
+        if not self.prs or not self.auto_rereview():
             return []
         done = self.meta.settings.get("auto_rereviewed") or {}
         return [p for p in self.prs.review if p.needs_reapproval and p.head_sha and not p.collective and done.get(p.key) != p.head_sha]
@@ -1884,7 +1887,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
+        return [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -1934,11 +1937,13 @@ class Board:
         elif name == "drafts" and key in ("enter", "space", "left", "right"):
             self.meta.set_setting("include_drafts", not self.meta.settings.get("include_drafts", False) or None)
             self.refresh_requested.set()
+        elif name == "rereview" and key in ("enter", "space", "left", "right"):
+            self.meta.set_setting("auto_rereview", None if not self.auto_rereview() else False)  # on unless turned off
         elif name == "age" and key in ("left", "right", "enter", "space"):
             i = REVIEW_AGE_CHOICES.index(self.review_age_days())
             days = REVIEW_AGE_CHOICES[(i + (-1 if key == "left" else 1)) % len(REVIEW_AGE_CHOICES)]
             self.meta.set_setting("review_max_age_days", None if days == DEFAULT_REVIEW_AGE else days)
-        elif key == "enter" and name not in ("refresh", "drafts", "age"):
+        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview"):
             ui["edit"] = {"field": name, "text": self.setting_text(name)}
         return None
 
@@ -2657,6 +2662,9 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
             shown: list[Seg] = [("◂ ", "faint"), (value, "bold"), (" ▸", "faint")]
         elif name == "drafts":
             shown = [("[x] yes" if s.get("include_drafts") else "[ ] no", "done" if s.get("include_drafts") else "faint")]
+        elif name == "rereview":
+            on_ = board.auto_rereview()
+            shown = [("[x] on" if on_ else "[ ] off", "done" if on_ else "faint"), ("  a session re-reviews PRs you approved that changed", "faint")]
         elif name == "age":
             days = board.review_age_days()
             shown = [("◂ ", "faint"), (f"hide PRs older than {days} days" if days else "show every PR", "bold"), (" ▸", "faint")]

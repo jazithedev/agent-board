@@ -347,6 +347,18 @@ class NeedsReapproval(unittest.TestCase):
         self.assertEqual((dismissed.approved_before, dismissed.head_sha, dismissed.needs_reapproval), (True, "sha1", True))
         self.assertTrue(pr.github_review_pr(self.node(2, {"me": "APPROVED"}), "me").needs_reapproval)  # re-requested while it stands
 
+    def test_an_approval_github_dismissed_still_counts_as_approved_before(self):
+        node = self.node(5, approved_before=False)  # the dismissed approval is no longer an APPROVED review...
+        node["dismissals"] = {"nodes": [{"previousReviewState": "APPROVED", "review": {"author": {"login": "me"}}},
+                                        {"previousReviewState": "CHANGES_REQUESTED", "review": {"author": {"login": "tom"}}}]}
+        self.assertTrue(pr.github_review_pr(node, "me").needs_reapproval)  # ...only the dismissal event remembers it
+        self.assertEqual(pr.approvers(node), {"me", "tom"})  # tom approved outright in the fixture; his dismissed change request adds nothing
+
+    def test_a_dismissed_change_request_is_not_an_approval(self):
+        node = self.node(6, approved_before=False)
+        node["dismissals"] = {"nodes": [{"previousReviewState": "CHANGES_REQUESTED", "review": {"author": {"login": "me"}}}]}
+        self.assertFalse(pr.github_review_pr(node, "me").approved_before)
+
     def test_a_standing_approval_or_no_earlier_approval_does_not(self):
         self.assertFalse(pr.github_review_pr(self.node(3, {"me": "APPROVED"}, requested=("team",)), "me").needs_reapproval)
         self.assertFalse(pr.github_review_pr(self.node(4, approved_before=False), "me").needs_reapproval)
