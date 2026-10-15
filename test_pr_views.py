@@ -690,6 +690,65 @@ class AutoReReview(unittest.TestCase):
         self.assertIn("re-reviews it", b.msg)
 
 
+class CloseApprovedReReviews(unittest.TestCase):
+    """Once GitHub shows your approval, the re-review session that gave it is deleted; one that did not approve stays."""
+
+    def setUp(self):
+        self.b = board("review")
+        self.b.set_sessions([session(1), session(2)])
+        self.sid = self.b.sessions[0].id
+        self.b.meta.update(self.sid, rereview={"pr": "github:acme/billing-api#9", "repo": "acme/billing-api", "number": 9})
+        self.b.sessions[0].state = "done"
+
+    def close(self, approved, rc=0):
+        calls = []
+        cli = lambda args, cwd=None, timeout=60: calls.append(args) or SimpleNamespace(returncode=rc, stdout="", stderr="boom")
+        with mock.patch.object(ab.prs, "viewer_approved", lambda repo, number, run: approved), \
+                mock.patch.object(ab, "run_cli", cli), mock.patch.object(ab, "load_sessions", lambda: list(self.b.sessions)):
+            ab.close_approved_rereviews(self.b)
+        return calls
+
+    def test_an_approved_finished_re_review_is_stopped_and_deleted(self):
+        self.assertEqual(self.close(True), [["stop", self.sid], ["rm", self.sid]])
+        self.assertIn("✓ #9 re-reviewed and approved", self.b.msg)
+        self.assertNotIn("rereview", self.b.meta.get(self.sid))
+
+    def test_one_that_did_not_approve_is_kept_and_not_asked_about_again(self):
+        self.assertEqual(self.close(False), [])
+        self.assertEqual(self.b.finished_rereviews(), [])  # checked at this point of the session
+        self.b.sessions[0].updated_at += 60  # you gave it more work: looked at again once it is done
+        self.assertEqual(len(self.b.finished_rereviews()), 1)
+
+    def test_nothing_happens_while_it_works_while_github_is_silent_or_while_you_are_inside_a_session(self):
+        self.b.sessions[0].state = "working"
+        self.assertEqual(self.close(True), [])
+        self.b.sessions[0].state = "done"
+        self.assertEqual(self.close(None), [])
+        self.assertEqual(len(self.b.finished_rereviews()), 1)  # tried again next time
+        self.b.attached = True
+        self.assertEqual(self.close(True), [])
+
+    def test_a_failed_delete_says_so(self):
+        self.close(True, rc=1)
+        self.assertIn("could not be closed: boom", self.b.msg)
+
+    def test_sessions_the_board_did_not_start_as_re_reviews_are_never_touched(self):
+        self.b.meta.update(self.sid, rereview=None)
+        self.assertEqual(self.close(True), [])
+
+    def test_a_finished_re_review_asks_for_a_pr_refresh_right_away(self):
+        self.b.refresh_requested.clear()
+        self.b.set_sessions(list(self.b.sessions))
+        self.assertTrue(self.b.refresh_requested.is_set())
+
+    def test_starting_a_re_review_remembers_its_session_id(self):
+        b = board("review", review=[review(9, approved_before=True, head_sha="abc")])
+        cli = lambda args, cwd=None, timeout=60: SimpleNamespace(returncode=0, stdout="backgrounded 1a2b3c4d · claude attach 1a2b3c4d\n", stderr="")
+        with mock.patch.object(ab, "run_cli", cli), mock.patch.object(ab, "load_sessions", lambda: []):
+            ab.start_rereview_session(b, b.prs.review[0])
+        self.assertEqual(b.meta.get("1a2b3c4d")["rereview"], {"pr": b.prs.review[0].key, "repo": "acme/billing-api", "number": 9})
+
+
 class RefreshMessage(unittest.TestCase):
     """ctrl+l says "refreshing…"; that note must give way to the outcome instead of staying on screen."""
 

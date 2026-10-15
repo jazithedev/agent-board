@@ -362,3 +362,18 @@ class NeedsReapproval(unittest.TestCase):
     def test_a_standing_approval_or_no_earlier_approval_does_not(self):
         self.assertFalse(pr.github_review_pr(self.node(3, {"me": "APPROVED"}, requested=("team",)), "me").needs_reapproval)
         self.assertFalse(pr.github_review_pr(self.node(4, approved_before=False), "me").needs_reapproval)
+
+
+class ViewerApproved(unittest.TestCase):
+    def answer(self, review, head="h1"):
+        body = json.dumps({"data": {"repository": {"pullRequest": {"headRefOid": head, "viewerLatestReview": review}}}})
+        return lambda *a, **k: SimpleNamespace(returncode=0, stdout=body, stderr="")
+
+    def test_only_an_approval_on_the_current_head_counts(self):
+        self.assertTrue(pr.viewer_approved("o/r", 1, self.answer({"state": "APPROVED", "commit": {"oid": "h1"}})))
+        self.assertFalse(pr.viewer_approved("o/r", 1, self.answer({"state": "APPROVED", "commit": {"oid": "old"}})))
+        self.assertFalse(pr.viewer_approved("o/r", 1, self.answer({"state": "COMMENTED", "commit": {"oid": "h1"}})))
+        self.assertFalse(pr.viewer_approved("o/r", 1, self.answer(None)))
+
+    def test_no_answer_is_none(self):
+        self.assertIsNone(pr.viewer_approved("o/r", 1, lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502")))

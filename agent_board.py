@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1303,6 +1303,17 @@ class Board:
                     self.sel = wanted
                 self.select_when_seen = None
         self._resolve_pending()
+        if self.finished_rereviews():  # a re-review just ended: look at GitHub now, not at the next interval
+            self.refresh_requested.set()
+
+    def finished_rereviews(self) -> list[tuple[Session, dict]]:
+        """Re-review sessions the board started that are done with their turn and were not checked at this point yet."""
+        out = []
+        for s in self.sessions:
+            info = self.meta.get(s.id).get("rereview")
+            if info and s.group in ("idle", "done") and s.id not in self.busy and info.get("checked") != s.updated_at:
+                out.append((s, info))
+        return out
 
     def _keep_tags(self, sessions: list[Session]) -> None:
         """A ticket or PR a session once showed stays on it, even after its summary line moves on (remembered in meta)."""
@@ -4034,6 +4045,7 @@ class PrLoader(threading.Thread):
             for pr in board.reapprovals_to_review():  # approved before, changed since: a session re-reviews and approves if it is safe
                 board.remember_rereview(pr)
                 start_rereview_session(board, pr)
+            close_approved_rereviews(board, self.run_)
         except Exception as exc:  # keep the board alive and say what went wrong
             board.prs = prs.PrData(errors=[f"refresh failed: {exc}"], fetched_at=time.time())
             outcome = f"✗ refresh failed: {exc}"
@@ -4123,10 +4135,43 @@ def start_rereview_session(board: Board, pr) -> None:
         board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {exc}"
         return
     if r.returncode == 0:
+        found = re.search(r"\b([0-9a-f]{8})\b", (r.stdout.strip().splitlines() or [""])[0])
+        if found:  # remembered, so the board can delete the session once GitHub shows it approved
+            board.meta.update(found.group(1), rereview={"pr": pr.key, "repo": pr.repo, "number": pr.number})
         board.msg = f"✓ {pr_ref(pr)} changed since you approved it: a session in {name} re-reviews it and approves it if nothing is dangerous"
     else:
         board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
     board.set_sessions(load_sessions())
+
+
+def close_approved_rereviews(board: Board, run=subprocess.run) -> None:
+    """Deletes each finished re-review session whose PR now carries your approval; one that did not approve stays to be read."""
+    if board.attached:
+        return  # you are inside a session (maybe this one): wait until you are back on the board
+    for s, info in board.finished_rereviews():
+        approved = prs.viewer_approved(info["repo"], info["number"], run)
+        if approved is None:
+            continue  # GitHub did not answer: try again on the next refresh
+        if not approved:
+            board.meta.update(s.id, rereview={**info, "checked": s.updated_at})  # kept; looked at again only if it works on
+            continue
+        board.successors[s.id] = board.choose_successor(s.id)
+        board.busy[s.id] = "closing…"
+        try:
+            run_cli(["stop", s.id])  # a session whose process is still alive refuses to be deleted
+            r = run_cli(["rm", s.id])
+        except (OSError, subprocess.SubprocessError) as exc:
+            r = subprocess.CompletedProcess([], 1, "", str(exc))
+        finally:
+            board.busy.pop(s.id, None)
+        ref = f"#{info['number']}"
+        if r.returncode == 0:
+            board.meta.update(s.id, rereview=None)
+            board.msg = f"✓ {ref} re-reviewed and approved: its session was closed"
+        else:
+            board.meta.update(s.id, rereview={**info, "checked": s.updated_at})
+            board.msg = f"✗ {ref} was approved, but its session could not be closed: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
+        board.set_sessions(load_sessions())
 
 
 def conflict_prompt(pr) -> str:

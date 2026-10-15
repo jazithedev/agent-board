@@ -467,6 +467,19 @@ def merge(pr: MyPr, method: str, run: Runner = subprocess.run) -> Optional[str]:
     return next((l.strip() for l in (proc.stderr + "\n" + proc.stdout).splitlines() if l.strip()), "failed")[:200]
 
 
+def viewer_approved(repo: str, number: int, run: Runner = subprocess.run) -> Optional[bool]:
+    """Whether your approval stands on the PR's current head commit; None when GitHub could not be asked."""
+    owner, _, name = repo.partition("/")
+    query = (f'query {{ repository(owner: "{owner}", name: "{name}") {{ pullRequest(number: {int(number)}) {{ '
+             "headRefOid viewerLatestReview { state commit { oid } } } } }")
+    try:
+        pull = _json(run, ["gh", "api", "graphql", "-f", f"query={query}"])["data"]["repository"]["pullRequest"]
+    except (FetchError, KeyError, TypeError):
+        return None
+    review = pull.get("viewerLatestReview") or {}
+    return review.get("state") == "APPROVED" and (review.get("commit") or {}).get("oid") == pull.get("headRefOid")
+
+
 def fetch_all(
     projects: dict[str, Remote], settings: dict, run: Runner, now: float, home: str = str(Path.home()), sleep: Callable[[float], None] = time.sleep
 ) -> PrData:
