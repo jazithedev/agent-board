@@ -149,6 +149,8 @@ class ReviewPr:
     updated_at: float = 0.0
     flags: tuple[str, ...] = ()  # new | re-requested | teammate-changes-requested | teammate-approved
     approved_by_me: bool = False  # your latest review is an approval that still stands
+    approved_before: bool = False  # you approved it at some point (GitHub only)
+    head_sha: str = ""
 
     @property
     def key(self) -> str:
@@ -157,6 +159,11 @@ class ReviewPr:
     @property
     def repo_key(self) -> str:
         return f"{self.provider}:{self.repo.lower()}"
+
+    @property
+    def needs_reapproval(self) -> bool:
+        """You approved it before, and it asks for your approval again: dismissed by new commits, or re-requested."""
+        return self.approved_before and (not self.approved_by_me or "re-requested" in self.flags)
 
     @property
     def collective(self) -> bool:
@@ -255,7 +262,8 @@ def github_review_pr(node: dict, me: str) -> ReviewPr:
         provider="github", repo=(node.get("repository") or {}).get("nameWithOwner", ""), number=int(node["number"]),
         title=node.get("title") or "", url=node.get("url", ""), author=_login(node.get("author")), draft=bool(node.get("isDraft")),
         created_at=parse_time(node.get("createdAt")), updated_at=parse_time(node.get("updatedAt")), flags=review_flags(node, me),
-        approved_by_me=_reviews(node).get(me) == "APPROVED",
+        approved_by_me=_reviews(node).get(me) == "APPROVED", head_sha=node.get("headRefOid") or "",
+        approved_before=any(_login(n.get("author")) == me for n in _nodes(node.get("approvals"))) if me else False,
     )
 
 
@@ -346,8 +354,9 @@ GITHUB_QUERY = f"""query {{
       commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}
   }}
   review: search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 100) {{
-    nodes {{ ... on PullRequest {{ {_PR_FIELDS}
-      {_PEOPLE} }} }}
+    nodes {{ ... on PullRequest {{ {_PR_FIELDS} headRefOid
+      {_PEOPLE}
+      approvals: reviews(states: APPROVED, last: 50) {{ nodes {{ author {{ login }} }} }} }} }}
   }}
 }}"""
 MERGE_TRIES = 3  # GitHub works merge states out lazily: a cold query reports UNKNOWN, the next one the real value

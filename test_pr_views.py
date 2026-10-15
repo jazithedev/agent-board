@@ -629,6 +629,51 @@ class CollectiveAutoApproval(unittest.TestCase):
         self.assertEqual(b.msg, "✗ could not auto-approve #10: nope")
 
 
+class AutoReReview(unittest.TestCase):
+    """A PR you approved before that asks for your approval again gets a review session of its own, which approves it if safe."""
+
+    def again(self, n, sha="abc123def4567890", **kw):
+        return review(n, approved_before=True, head_sha=sha, **kw)
+
+    def test_picks_prs_approved_before_needing_approval_again_but_not_collectives(self):
+        b = board("review", review=[
+            self.again(1), self.again(2, approved_by_me=True), self.again(3, approved_by_me=True, flags=("re-requested",)), review(4),
+            prs.ReviewPr("github", "acme/billing-api", 5, "[Collective] stack", "u", "tom", approved_before=True, head_sha="s"),
+        ])
+        self.assertEqual([p.number for p in b.reapprovals_to_review()], [1, 3])
+
+    def test_one_session_per_head_commit_remembered_across_restarts(self):
+        b = board("review")
+        b.set_sessions([session(1)])
+        started = []
+        data = prs.PrData(review=[self.again(7)], fetched_at=NOW)
+        loader = ab.PrLoader(b, run=RefreshMessage.quiet_world)
+        with mock.patch.object(ab.prs, "fetch_all", lambda *a, **k: data), \
+                mock.patch.object(ab, "start_rereview_session", lambda board, pr: started.append(pr.number)):
+            loader.refresh()
+            loader.refresh()
+            self.assertEqual(started, [7])
+            self.assertEqual(ab.Meta(b.meta.path).settings["auto_rereviewed"], {data.review[0].key: "abc123def4567890"})
+            data.review = [self.again(7, sha="fffeee")]  # new commits after that: another look
+            loader.refresh()
+        self.assertEqual(started, [7, 7])
+
+    def test_the_prompt_runs_the_review_command_on_the_changes_and_approves_only_if_safe(self):
+        b = board("review", review=[self.again(9)])
+        calls = []
+        with mock.patch.object(ab, "run_cli", lambda args, cwd=None, timeout=60: calls.append((args, cwd)) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                mock.patch.object(ab, "load_sessions", lambda: []):
+            ab.start_rereview_session(b, b.prs.review[0])
+        [(args, cwd)] = calls
+        prompt = args[-1]
+        self.assertEqual(cwd, "/srv/www/billing-api")
+        self.assertTrue(prompt.startswith("/code-review:code-review https://example.com/acme/billing-api/pull/9 "))
+        for part in ("since my last approval", "`abc123def456`", "nothing crucial or dangerous", "gh pr review 9 --repo acme/billing-api --approve", "do not approve"):
+            self.assertIn(part, prompt)
+        self.assertIn("PR #9", prompt)  # so the ⟳ on the row finds this session
+        self.assertIn("re-reviews it", b.msg)
+
+
 class RefreshMessage(unittest.TestCase):
     """ctrl+l says "refreshing…"; that note must give way to the outcome instead of staying on screen."""
 

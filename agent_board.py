@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -386,6 +386,13 @@ MERGE_PROMPT = (
     "merge leaves the branch looking unmerged to git, so before forcing a delete check that its tip is the head commit the {kind} "
     "was merged with. Keep and tell me about any worktree with uncommitted changes and any branch with commits that were not "
     "part of the {kind}. Leave every other branch and worktree alone."
+)
+REREVIEW_PROMPT = (
+    " I approved PR {ref} before and it needs my approval again. Review only what changed since my last approval: compare "
+    "the commit I approved with the current head `{sha}` (`gh pr view {number} --repo {repo} --json reviews,commits` shows both). "
+    "If you find nothing crucial or dangerous in those changes (no bug that breaks behaviour, no security, data-loss or "
+    "migration risk), approve it yourself with `gh pr review {number} --repo {repo} --approve`. Otherwise do not approve: "
+    "leave your findings on the PR and tell me what stopped you."
 )
 MERGE_KEYS = {"s": "squash", "m": "merge", "r": "rebase"}
 DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading each one and its diff with glab: {urls}"
@@ -1788,6 +1795,19 @@ class Board:
         if not self.prs:
             return []
         return [p for p in self.prs.review if p.collective and not p.approved_by_me and p.key not in self.approved | self.auto_tried | set(self.pr_busy_keys)]
+
+    def reapprovals_to_review(self) -> list:
+        """PRs you approved before that ask for your approval again, at a head commit no session was started for yet."""
+        if not self.prs:
+            return []
+        done = self.meta.settings.get("auto_rereviewed") or {}
+        return [p for p in self.prs.review if p.needs_reapproval and p.head_sha and not p.collective and done.get(p.key) != p.head_sha]
+
+    def remember_rereview(self, pr) -> None:
+        """One session per PR and head commit, also across restarts; PRs that left the queue are forgotten."""
+        queued = {p.key for p in self.prs.review} if self.prs else set()
+        done = {k: v for k, v in (self.meta.settings.get("auto_rereviewed") or {}).items() if k in queued}
+        self.meta.set_setting("auto_rereviewed", {**done, pr.key: pr.head_sha})
 
     def without_approved(self, data: "prs.PrData") -> "prs.PrData":
         data.review = [p for p in data.review if p.key not in self.approved]
@@ -4003,6 +4023,9 @@ class PrLoader(threading.Thread):
             for pr in board.collectives_to_approve():  # a collective PR only gathers reviewed ones: approve it without asking
                 board.auto_tried.add(pr.key)
                 start_approval(board, pr, auto=True)
+            for pr in board.reapprovals_to_review():  # approved before, changed since: a session re-reviews and approves if it is safe
+                board.remember_rereview(pr)
+                start_rereview_session(board, pr)
         except Exception as exc:  # keep the board alive and say what went wrong
             board.prs = prs.PrData(errors=[f"refresh failed: {exc}"], fetched_at=time.time())
             outcome = f"✗ refresh failed: {exc}"
@@ -4075,6 +4098,26 @@ def start_review_sessions(board: Board, items: list) -> None:
             failed.append(f"{name}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}")
     board.marked.clear()
     board.msg = ("✓ review session started for " + ", ".join(started) if started else "") + (("  ✗ " + "; ".join(failed)) if failed else "")
+    board.set_sessions(load_sessions())
+
+
+def rereview_prompt(board: Board, pr) -> str:
+    """The usual review command for this one PR, told to look at what changed since your approval and to approve if it is safe."""
+    _, _, prompt, _ = review_prompts(board, [pr])[0]
+    return prompt + REREVIEW_PROMPT.format(ref=pr_ref(pr), number=pr.number, repo=pr.repo, sha=pr.head_sha[:12])
+
+
+def start_rereview_session(board: Board, pr) -> None:
+    name, path = board.pr_project(pr)
+    try:
+        r = run_cli(bg_command(rereview_prompt(board, pr), board.model()), cwd=path or None)
+    except (OSError, subprocess.SubprocessError) as exc:
+        board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {exc}"
+        return
+    if r.returncode == 0:
+        board.msg = f"✓ {pr_ref(pr)} changed since you approved it: a session in {name} re-reviews it and approves it if nothing is dangerous"
+    else:
+        board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
     board.set_sessions(load_sessions())
 
 

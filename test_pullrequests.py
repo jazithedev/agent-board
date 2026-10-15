@@ -335,3 +335,18 @@ class ApprovedByMe(unittest.TestCase):
         self.assertTrue(pr.github_review_pr(review_node("o/r", 1, reviews={"me": "APPROVED"}), "me").approved_by_me)
         self.assertFalse(pr.github_review_pr(review_node("o/r", 2, reviews={"me": "DISMISSED", "tom": "APPROVED"}), "me").approved_by_me)
         self.assertFalse(pr.github_review_pr(review_node("o/r", 3), "me").approved_by_me)
+
+
+class NeedsReapproval(unittest.TestCase):
+    def node(self, n, latest=None, approved_before=True, requested=("me",)):
+        return review_node("o/r", n, requested=requested, reviews=latest or {}, headRefOid=f"sha{n}",
+                           approvals={"nodes": [{"author": {"login": "me"}}] if approved_before else [{"author": {"login": "tom"}}]})
+
+    def test_an_approval_dismissed_by_new_commits_or_a_re_request_needs_you_again(self):
+        dismissed = pr.github_review_pr(self.node(1, {"me": "DISMISSED"}), "me")
+        self.assertEqual((dismissed.approved_before, dismissed.head_sha, dismissed.needs_reapproval), (True, "sha1", True))
+        self.assertTrue(pr.github_review_pr(self.node(2, {"me": "APPROVED"}), "me").needs_reapproval)  # re-requested while it stands
+
+    def test_a_standing_approval_or_no_earlier_approval_does_not(self):
+        self.assertFalse(pr.github_review_pr(self.node(3, {"me": "APPROVED"}, requested=("team",)), "me").needs_reapproval)
+        self.assertFalse(pr.github_review_pr(self.node(4, approved_before=False), "me").needs_reapproval)
