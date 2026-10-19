@@ -181,7 +181,7 @@ class PasteRouting(unittest.TestCase):
         b.mode = "review"
         b.handle("paste", "text")
         self.assertEqual(b.input, "")
-        self.assertIn("status or project view", b.msg)
+        self.assertIn("switch to the Sessions tab", b.msg)
 
 
 class CutAndCopy(unittest.TestCase):

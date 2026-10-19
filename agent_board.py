@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -156,6 +156,16 @@ def derive_tags(*sources: str) -> list[Tag]:
     return tags
 
 
+def pr_numbers(*sources: str) -> tuple[int, ...]:
+    """Every PR / MR number a session's text names. Only two become tags; all of them link the session to their PR rows."""
+    found: list[int] = []
+    for m in PR_RE.finditer("\n".join(s for s in sources if s)):
+        number = int(next(g for g in m.groups() if g))
+        if number not in found:
+            found.append(number)
+    return tuple(found)
+
+
 # ───────────────────────────── model ─────────────────────────────
 
 WORKING = {"working", "running", "busy"}
@@ -181,6 +191,7 @@ class Session:
     started_at: float = 0.0  # epoch seconds
     updated_at: float = 0.0
     auto_tags: list[Tag] = field(default_factory=list)
+    prs: tuple[int, ...] = ()  # every PR number its text names (tags hold two at most)
     idle: bool = False  # alive and finished its turn, though its last written state still says "working"
     waiting_on: list[str] = field(default_factory=list)  # background tasks it is waiting on after its turn ended
 
@@ -300,6 +311,7 @@ def build_session(row: dict, state: dict, live_branch: str = "") -> Session:
         started_at=started,
         updated_at=updated,
         auto_tags=derive_tags(name, intent, detail, branch, worktree_folder(cwd), live_branch),
+        prs=pr_numbers(name, intent, detail, branch, worktree_folder(cwd), live_branch),
         idle=idle,
         waiting_on=background_tasks(state, in_flight) if turn_ended and still_busy else [],
     )
@@ -402,7 +414,8 @@ VIEW_LABEL = {"status": "by status", "project": "by project", "review": "review 
 TABS = (("sessions", "Sessions"), ("review", "Review queue"), ("mine", "My PRs"))  # the title row's tabs; Sessions is grouped by status or project
 GROUPINGS = ("status", "project")
 MINE_GROUPS = [("attention", "Needs attention"), ("ready", "Ready to merge"), ("waiting", "Waiting"), ("draft", "Draft")]
-DEFAULT_LIBRARY = ["Bug", "Feature", "Docs", "Plan", "Tests", "Code Review", "Pull Request", "Urgent", "Blocked"]
+DEFAULT_LIBRARY = ["Bug", "Feature", "Docs", "Plan", "Tests", "Code Review", "Pull Request", "Ready for QA", "Urgent", "Blocked"]
+PR_TAG_ID = "pr:"  # a pull request's tags sit in meta under "pr:<its key>", beside the sessions', so tag renames and deletes reach them too
 DEFAULT_RULES = [
     {"tag": "Bug", "pattern": r"\b(bug|fix(es|ed)?|broken|crash(es|ed)?|errors?|exceptions?|regression|fail(s|ed|ing)?)\b"},
     {"tag": "Feature", "pattern": r"\b(add|implement|build|create|introduce|support)\b"},
@@ -1103,7 +1116,6 @@ class Effect:
 
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
-    ("ctrl+s", "next tab, round and round"),
     ("ctrl+l", "refresh pull requests now"),
     ("ctrl+o", "settings: PR refresh interval, drafts, review queue age, auto re-review, review command"),
 ]
@@ -1157,6 +1169,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("o", "open the pull request in the browser"),
         ("f", "fix conflicts: a background session merges the base into the branch, resolves them and pushes"),
         ("m", "merge, choosing squash, merge commit or rebase; a PR behind its base is updated first and merged once its checks pass"),
+        ("ctrl+g", "tag the pull request: Ready for QA or any tag of yours, picked or typed new"),
         ("ctrl+f", "filter pull requests"),
         *HELP_COMMON_END,
         ("esc", "clear the filter, then back to the session list"),
@@ -1324,7 +1337,11 @@ class Board:
             s.auto_tags = merge_tags(seen, s.auto_tags)
             labels = [[t.label, t.kind] for t in s.auto_tags]
             if labels and labels != entry.get("seen"):
-                self.meta.sessions[s.id] = {**entry, "seen": labels}
+                entry = self.meta.sessions[s.id] = {**entry, "seen": labels}
+                changed = True
+            s.prs = tuple(dict.fromkeys([int(n) for n in entry.get("prs", []) if str(n).isdigit()] + list(s.prs)))
+            if s.prs and list(s.prs) != entry.get("prs"):
+                self.meta.sessions[s.id] = {**entry, "prs": list(s.prs)}
                 changed = True
         if changed:
             self.meta._save()
@@ -1358,6 +1375,23 @@ class Board:
             if label not in have:
                 tags.append(Tag(label, "custom"))
         return tags
+
+    def pr_tags(self, pr) -> list[Tag]:
+        return [Tag(label, "custom") for label in self.meta.get(PR_TAG_ID + pr.key).get("tags", [])]
+
+    def target_tags(self, target: str) -> list[Tag]:
+        """The tags the tag picker's target shows: a session's (derived and manual) or a pull request's."""
+        if target.startswith(PR_TAG_ID):
+            return [Tag(label, "custom") for label in self.meta.get(target).get("tags", [])]
+        session = next((x for x in self.sessions if x.id == target), None)
+        return self.tags_of(session) if session else []
+
+    def target_name(self, target: str) -> str:
+        if target.startswith(PR_TAG_ID):
+            pr = next((p for p in (self.prs.mine if self.prs else []) if PR_TAG_ID + p.key == target), None)
+            return f"{pr_ref(pr)} {pr.title}" if pr else target.removeprefix(PR_TAG_ID)
+        session = next((x for x in self.sessions if x.id == target), None)
+        return self.name_of(session) if session else target
 
     def tag_on(self, s: Session, label: str) -> Optional[Tag]:
         """The tag this session shows under that name (derived or manual), compared case-insensitively."""
@@ -1471,8 +1505,7 @@ class Board:
             return []
         text = " ".join(tp["text"].split())
         items = [("tag", t) for t in self.meta.library if text.lower() in t.lower()]
-        session = next((s for s in self.sessions if s.id == tp["sid"]), None)
-        derived = {t.label.lower() for t in session.auto_tags} if session else set()
+        derived = {t.label.lower() for t in self.target_tags(tp["sid"]) if t.kind != "custom"}
         if text and not self.meta.find_tag(text) and text.lower() not in derived:
             items.append(("create", text))
         return items
@@ -1508,8 +1541,7 @@ class Board:
             items = self.tagpicker_items()
             if items:
                 kind, label = items[min(tp["idx"], len(items) - 1)]
-                session = next((x for x in self.sessions if x.id == tp["sid"]), None)
-                shown = self.tag_on(session, label) if session and kind == "tag" else None
+                shown = next((t for t in self.target_tags(tp["sid"]) if t.label.lower() == label.lower()), None) if kind == "tag" else None
                 if shown and shown.kind != "custom":
                     self.msg = f"“{shown.label}” comes from the session itself, so it can't be toggled"
                     return None
@@ -1750,13 +1782,14 @@ class Board:
     def linked_sessions(self, pr) -> list[Session]:
         path = self.pr_project(pr)[1]
         label = f"PR #{pr.number}"
-        return [s for s in self.sessions if path and s.project_path == path and any(t.kind == "pr" and t.label == label for t in s.auto_tags)]
+        return [s for s in self.sessions if path and s.project_path == path and (pr.number in s.prs or any(t.kind == "pr" and t.label == label for t in s.auto_tags))]
 
     def _matches_pr(self, pr) -> bool:
         q = self.query.strip().lower()
         if not q:
             return True
-        hay = " ".join([pr.title, pr.repo, getattr(pr, "author", ""), getattr(pr, "ticket", ""), self.pr_project(pr)[0], f"#{pr.number}"]).lower()
+        tags = [t.label for t in self.pr_tags(pr)]
+        hay = " ".join([pr.title, pr.repo, getattr(pr, "author", ""), getattr(pr, "ticket", ""), self.pr_project(pr)[0], f"#{pr.number}", *tags]).lower()
         return all(part in hay for part in q.split())
 
     def pr_groups(self) -> list[tuple[str, str, list[tuple[object, int]]]]:
@@ -1886,10 +1919,6 @@ class Board:
         names = [t for t, _ in TABS]
         self.set_tab(names[max(0, min(len(names) - 1, names.index(self.tab) + delta))])
 
-    def cycle_view(self) -> None:
-        names = [t for t, _ in TABS]
-        self.set_tab(names[(names.index(self.tab) + 1) % len(names)])
-
     def toggle_grouping(self) -> None:
         if self.mode in PR_VIEWS:
             return
@@ -1995,6 +2024,8 @@ class Board:
             if p.merge == "conflict":
                 return Effect("fix_conflicts", items=[p])
             self.msg = f"{pr_ref(p)} has no conflicts to fix"
+        elif key == "ctrl+g" and self.mode == "mine" and p:
+            self.tagpicker = {"sid": PR_TAG_ID + p.key, "text": "", "idx": 0, "rename": None, "delete": None}
         elif key == "char" and ch == "m" and self.mode == "mine" and p:
             refusal = self._merge_refusal(p)
             if refusal:
@@ -2016,7 +2047,7 @@ class Board:
         elif key == "char" and ch == "?":
             self.help = True
         elif key == "char" and ch == "r":
-            self.msg = "r reviews marked PRs in the review queue (ctrl+s)"
+            self.msg = "r reviews marked PRs in the review queue (alt+←)"
         return None
 
     # ── input ──
@@ -2243,7 +2274,7 @@ class Board:
             if self.edit["kind"] == "find":
                 self.query = self.edit["text"]
         elif self.mode in PR_VIEWS:
-            self.msg = "paste goes into the prompt: switch to the status or project view (ctrl+s)"
+            self.msg = "paste goes into the prompt: switch to the Sessions tab (alt+←)"
         elif text:
             self.sel = None
             if len(text) > PASTE_CHIP_MIN_CHARS:
@@ -2331,9 +2362,6 @@ class Board:
             self.query = text
 
     def _handle_main(self, key: str, ch: str) -> Optional[Effect]:
-        if key == "ctrl+s":
-            self.cycle_view()
-            return None
         if key in ("alt+left", "alt+right"):  # in the prompt too: ctrl+← / ctrl+→ still move the caret by word
             self.move_tab(-1 if key == "alt+left" else 1)
             return None
@@ -2531,12 +2559,15 @@ def pr_row(board: Board, pr, depth: int, width: int, selected: bool) -> Line:
         nest = "└ " * min(depth, 1) if depth else ""
         lead = [("▌" if selected else " ", "accent"), (" ", "normal"), (icon, style), ("  ", "normal"), ("  " * max(0, depth - 1) + nest, "faint")]
         flags = pr.attention + pr.notes
+        tags = board.pr_tags(pr)
         project, _ = board.pr_project(pr)
         age = fmt_age(now - pr.updated_at) if pr.updated_at else ""
         right = [("● ", project_style(project)), (project, "dim"), (f"  {age:>4}", "dim")]
     if linked:
         right.append((f"  ⟳{len(linked)}" if len(linked) > 1 else "  ⟳", "accent"))
     chips: list[list[Seg]] = [[(f" {f} ", PR_FLAG_STYLE.get(f, "chip_info"))] for f in flags]
+    if not review:
+        chips = [[(f" {t.label} ", tag_style(t))] for t in tags] + chips  # your own tags first: they say where the PR stands
     if pr.key in board.pr_busy_keys:
         chips.insert(0, [(f" {board.pr_busy_keys[pr.key]} ", "chip_warn")])
     ref = pr_ref(pr)
@@ -3169,7 +3200,7 @@ def _hint_segs(board: Board) -> list[Seg]:
     elif board.mode == "review":
         hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+l refresh · ctrl+o settings · esc back"
     elif board.mode == "mine":
-        hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+o settings · ctrl+s next view · esc back"
+        hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+o settings · alt+←/→ tabs · esc back"
     elif board.sel:
         s = board.selected()
         stop = "stop" if s and s.group == "working" else "delete"
@@ -3193,7 +3224,7 @@ def _hint_segs(board: Board) -> list[Seg]:
         if board.pastes:
             hint = f"enter start in {board.start_target()[0]} on {model_label(board.model())} · backspace removes a pasted block · ctrl+x cut · ctrl+c clears"
     else:
-        hint = "↑/↓ select · ctrl+f find · ctrl+s view · ctrl+p project · ? shortcuts · esc quit"
+        hint = "↑/↓ select · ctrl+f find · alt+←/→ tabs · ctrl+p project · ? shortcuts · esc quit"
     return [(" ", "normal"), (hint, "faint")]
 
 
@@ -3221,7 +3252,7 @@ def _paste(lines: list[Line], box: list[Line], width: int) -> None:
 def _overlay_help(board: Board, lines: list[Line], width: int) -> None:
     room = max(12, width - 4 - 22)
     rows = [[(f" {k:<18}", "key"), (fit(v, room), "dim")] for k, v in help_rows(board.mode)]
-    rows += [[("", "normal")], [(" ctrl+s switches view; every view has its own shortcuts", "faint")]]
+    rows += [[("", "normal")], [(" alt+← / alt+→ switch tabs; every view has its own shortcuts", "faint")]]
     _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, f"shortcuts · {VIEW_LABEL[board.mode]}"), width)
 
 
@@ -3269,7 +3300,7 @@ def _overlay_modelpicker(board: Board, lines: list[Line], width: int) -> None:
 
 def _overlay_tagpicker(board: Board, lines: list[Line], width: int) -> None:
     tp = board.tagpicker
-    session = next((s for s in board.sessions if s.id == tp["sid"]), None)
+    have = board.target_tags(tp["sid"])
     items = board.tagpicker_items()
     tp["idx"] = min(tp["idx"], max(0, len(items) - 1))
     if tp["rename"] is not None:
@@ -3286,7 +3317,7 @@ def _overlay_tagpicker(board: Board, lines: list[Line], width: int) -> None:
         if kind == "create":
             rows.append([arrow, ("+ create ", "accent"), (f"“{label}”", "bold"), (" ", "normal")])
         else:
-            shown = board.tag_on(session, label) if session else None
+            shown = next((t for t in have if t.label.lower() == label.lower()), None)
             row: list[Seg] = [arrow, ("[x] " if shown else "[ ] ", "done" if shown else "faint")]
             row.append((f" {label} ", tag_style(shown or Tag(label, "custom"))))
             if shown and shown.kind != "custom":
@@ -3294,9 +3325,10 @@ def _overlay_tagpicker(board: Board, lines: list[Line], width: int) -> None:
             rows.append(row + [(" ", "normal")])
     if not items:
         rows.append([("   no tags yet — type a name to create one ", "faint")])
-    if session and session.auto_tags:
-        rows += [[("", "normal")], [("   derived: ", "faint"), (", ".join(t.label for t in session.auto_tags), "dim"), (" ", "normal")]]
-    name = board.name_of(session) if session else tp["sid"]
+    derived = [t.label for t in have if t.kind != "custom"]
+    if derived:
+        rows += [[("", "normal")], [("   derived: ", "faint"), (", ".join(derived), "dim"), (" ", "normal")]]
+    name = board.target_name(tp["sid"])
     _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, f"tags · {fit(name, 40)}"), width)
 
 

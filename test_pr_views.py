@@ -48,13 +48,11 @@ def keys(b, *names):
 
 
 class Views(unittest.TestCase):
-    def test_ctrl_s_cycles_the_three_tabs_and_wraps(self):
-        b = board("status")
-        seen = []
-        for _ in range(4):
+    def test_ctrl_s_no_longer_switches_tabs(self):
+        for mode in ("status", "review", "mine"):
+            b = board(mode)
             b.handle("ctrl+s")
-            seen.append(b.mode)
-        self.assertEqual(seen, ["review", "mine", "status", "review"])
+            self.assertEqual(b.mode, mode)
 
 
 class Tabs(unittest.TestCase):
@@ -749,6 +747,91 @@ class CloseApprovedReReviews(unittest.TestCase):
         self.assertEqual(b.meta.get("1a2b3c4d")["rereview"], {"pr": b.prs.review[0].key, "repo": "acme/billing-api", "number": 9})
 
 
+class LinksToEveryNamedPr(unittest.TestCase):
+    """A session reviewing four PRs shows only two PR tags, but every one of the four rows gets its ⟳."""
+
+    def test_all_pr_numbers_a_session_names_link_it(self):
+        text = " ".join(f"https://example.com/acme/billing-api/pull/{n}" for n in (5, 6, 7, 8))
+        self.assertEqual(ab.pr_numbers("/code-review:code-review " + text), (5, 6, 7, 8))
+        b = board("review", review=[review(n) for n in (5, 6, 7, 8)])
+        s = session(9)
+        s.auto_tags, s.prs = ab.derive_tags(text), ab.pr_numbers(text)
+        b.set_sessions([s])
+        self.assertEqual(len([t for t in s.auto_tags if t.kind == "pr"]), 2)
+        self.assertEqual([bool(b.linked_sessions(p)) for p in b.prs.review], [True, True, True, True])
+
+    def test_the_numbers_stay_once_seen(self):
+        b = board("review", review=[review(7)])
+        s = session(9)
+        s.prs = (7,)
+        b.set_sessions([s])
+        later = session(9)  # its summary line moved on and no longer names the PR
+        b.set_sessions([later])
+        self.assertEqual(later.prs, (7,))
+        self.assertTrue(b.linked_sessions(b.prs.review[0]))
+
+
+class TagMyPrs(unittest.TestCase):
+    """ctrl+g in My PRs tags a pull request with any tag of yours, as in the Sessions view."""
+
+    def setUp(self):
+        self.b = board("mine", mine=[mine(1, decision="approved"), mine(2)])
+        self.b.pr_sel = self.b.pr_flat()[0].key
+
+    def tag(self, label):
+        self.b.handle("ctrl+g")
+        for c in label:
+            self.b.handle("space" if c == " " else "char", c)
+        self.b.handle("enter")
+        self.b.handle("esc")
+
+    def test_ready_for_qa_is_in_a_new_library_and_shows_on_the_row(self):
+        self.assertIn("Ready for QA", self.b.meta.library)
+        self.tag("Ready for QA")
+        pr = self.b.pr_flat()[0]
+        self.assertEqual([t.label for t in self.b.pr_tags(pr)], ["Ready for QA"])
+        row = next(ab.plain(l) for l in ab.compose(self.b, 120, 24)[0] if "Mine 1" in ab.plain(l))
+        self.assertIn(" Ready for QA ", row)
+        self.assertEqual(self.b.pr_tags(self.b.pr_flat()[1]), [])  # only that PR
+
+    def test_any_new_tag_can_be_created_and_toggled_off_again(self):
+        self.tag("Waiting on design")
+        self.assertIn("Waiting on design", self.b.meta.library)
+        self.assertEqual([t.label for t in self.b.pr_tags(self.b.pr_flat()[0])], ["Waiting on design"])
+        self.b.handle("ctrl+g")
+        for c in "Waiting on design":
+            self.b.handle("space" if c == " " else "char", c)
+        self.b.handle("enter")
+        self.assertEqual(self.b.pr_tags(self.b.pr_flat()[0]), [])
+
+    def test_tags_survive_a_restart_follow_renames_and_go_with_deletes(self):
+        self.tag("Ready for QA")
+        key = ab.PR_TAG_ID + self.b.pr_flat()[0].key
+        self.assertEqual(ab.Meta(self.b.meta.path).get(key)["tags"], ["Ready for QA"])
+        self.b.meta.rename_tag("Ready for QA", "QA")
+        self.assertEqual(self.b.meta.get(key)["tags"], ["QA"])
+        self.b.meta.delete_tag("QA")
+        self.assertEqual(self.b.meta.get(key), {})
+
+    def test_the_picker_shows_the_pr_and_ticks_its_tags(self):
+        self.tag("Ready for QA")
+        self.b.handle("ctrl+g")
+        text = "\n".join(ab.plain(l) for l in ab.compose(self.b, 120, 30)[0])
+        self.assertIn("tags · #1 Mine 1", text)
+        self.assertIn("[x]  Ready for QA", text)
+
+    def test_the_filter_finds_prs_by_tag(self):
+        self.tag("Ready for QA")
+        self.b.query = "qa"
+        self.assertEqual([p.number for p in self.b.pr_flat()], [1])
+
+    def test_ctrl_g_does_nothing_in_the_review_queue(self):
+        b = board("review", review=[review(5)])
+        b.pr_sel = b.pr_flat()[0].key
+        b.handle("ctrl+g")
+        self.assertIsNone(b.tagpicker)
+
+
 class RefreshMessage(unittest.TestCase):
     """ctrl+l says "refreshing…"; that note must give way to the outcome instead of staying on screen."""
 
@@ -853,7 +936,7 @@ class ContextualHelp(unittest.TestCase):
     def test_every_view_can_switch_views_refresh_and_open_settings_and_leave_with_esc(self):
         for mode in ("status", "review", "mine"):
             keys = self.keys(mode)
-            for needed in ("ctrl+s", "ctrl+l", "ctrl+o", "esc"):
+            for needed in ("alt+← / alt+→", "ctrl+l", "ctrl+o", "esc"):
                 self.assertIn(needed, keys, f"{mode} lacks {needed}")
 
     def test_no_key_is_listed_twice_in_one_view(self):
