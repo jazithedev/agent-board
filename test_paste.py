@@ -160,8 +160,8 @@ class PasteRouting(unittest.TestCase):
         b.handle("paste", "Customer\nFacing")
         self.assertEqual(b.tagpicker["text"], "Customer Facing")
         b.handle("esc")
-        b.handle("ctrl+o")
-        for _ in range(4):  # PR refresh, drafts, review queue age, auto re-review, then the review command
+        b.handle("ctrl+s")
+        for _ in range(5):  # PR refresh, PR projects, drafts, review queue age, auto re-review, then the review command
             b.handle("down")
         b.handle("enter")
         b.handle("ctrl+u")
@@ -306,7 +306,7 @@ class CtrlC(unittest.TestCase):
         self.assertEqual((b.input, b.sel), ("", "id1"))
 
     def test_popups_are_closed_like_esc_and_the_hidden_draft_is_left_alone(self):
-        for opener, attr in (("ctrl+p", "picker"), ("ctrl+o", "settingsui"), ("ctrl+f", "edit")):
+        for opener, attr in (("ctrl+p", "picker"), ("ctrl+s", "settingsui"), ("ctrl+f", "edit")):
             b = board()
             b.handle("paste", "draft")
             b.handle(opener)

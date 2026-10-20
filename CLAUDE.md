@@ -39,11 +39,11 @@ Slow work runs on daemon threads so the screen keeps drawing. `Loader` (sessions
 
 ### Sessions started on the user's behalf
 
-Review, fix-conflicts and merge sessions are `claude --bg` runs (`bg_command` + `run_cli`, with cwd set to the PR's project) driven by prompt templates (`CONFLICT_PROMPT`, `MERGE_PROMPT`). Each prompt names the PR as `PR #N` / `MR !N`. That text is how the session gets a `pr` tag (`derive_tags`), and the tag is how `Board.linked_sessions()` puts the ⟳ on the PR row. Tags derived from text are capped per kind by `TAG_LIMITS` (two PRs per session).
+Review, fix-conflicts and merge sessions are `claude --bg` runs (`bg_command` + `run_cli`, with cwd set to the PR's project) driven by prompt templates (`CONFLICT_PROMPT`, `MERGE_PROMPT`). Each prompt names the PR as `PR #N` / `MR !N`. That text is how the session gets a `pr` tag (`derive_tags`, capped per kind by `TAG_LIMITS`: two PRs) and its `Session.prs` (every PR number named, uncapped, remembered in meta), and `Board.linked_sessions()` uses those to put the ⟳ on the PR row.
 
 ### Persistence
 
-`Meta` (`~/.config/agent-board/meta.json`, overridable with `AGENT_BOARD_META`) is the board's only state file: renames, tags, pins, the tags each session has shown before (`seen`), and settings (`meta.settings`, edited in the `ctrl+o` UI via `settings_fields()`). The board never writes Claude Code's files.
+`Meta` (`~/.config/agent-board/meta.json`, overridable with `AGENT_BOARD_META`) is the board's only state file: renames, tags, pins, the tags each session has shown before (`seen`), and settings (`meta.settings`, edited in the `ctrl+s` UI via `settings_fields()`). The board never writes Claude Code's files.
 
 ## Tests
 

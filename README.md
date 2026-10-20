@@ -130,7 +130,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, a long prompt grows upward into as many rows as it needs (up to half the screen, then it scrolls with the caret), and a half-written prompt survives while you open other sessions. The caret moves with `←` `→`, a click, `ctrl+←` / `ctrl+→` (by word) and `home` / `end`; `delete`, `ctrl+w` and `alt+backspace` edit around it.
 - **Mouse**: a click selects a session, a double-click opens it; dragging highlights text live and copies it.
 
-**Pull requests** (optional). Two more tabs in the title row, **Review queue** and **My PRs**, for the projects that have sessions on the board. `alt+←` / `alt+→` move between tabs, and a click on a tab opens it:
+**Pull requests** (optional). Two more tabs in the title row, **Review queue** and **My PRs**, for the projects that have sessions on the board, or the projects you tick under *PR projects* in settings (`ctrl+s`): any folder you have used Claude Code in, with or without sessions. `alt+←` / `alt+→` move between tabs, and a click on a tab opens it:
 
 ```
  🦎 Jazi's Agent Board    Sessions   Review queue   My PRs   demo data   1 awaiting · 3 working · 4 completed
@@ -161,12 +161,12 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
   Disk     █████████████░░░░░░░  67%  30G free of 95G  ·  Claude data 1.3G  ·  worktrees 3.0G
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
    space marks a PR for review, r starts a review session
- space mark · ctrl+a all · r review · enter open · o browser · ctrl+l refresh · ctrl+o settings · ct…
+ space mark · ctrl+a all · r review · enter open · o browser · ctrl+l refresh · ctrl+s settings · ct…
 ```
 
-- **Review queue**: what is waiting for your review. `space` marks PRs, `r` starts **one review session per project** for the marked ones. `a` approves the highlighted PR on GitHub (`gh`) or GitLab (`glab`) after one confirming key (`a` or `enter`); once approved it leaves the queue. A PR with `[Collective]` in its title (the PR that gathers a stack whose PRs were reviewed one by one) is approved automatically each time the queue loads, if it does not have your approval yet; one try per PR, so a failure is reported once and not retried. A GitHub PR you approved before that asks for your approval again (new commits dismissed it, or the author re-requested you) gets a background review session of its own: your review command on that PR, told to look only at what changed since your approval and to approve it if nothing is crucial or dangerous, and otherwise to leave its findings. One session per PR and head commit, remembered across restarts. When such a session has finished and GitHub shows your approval on the PR's current commit, the board deletes the session; one that did not approve stays so you can read why. Turn it off with *Auto re-review* in settings (`ctrl+o`). PRs opened more than 30 days ago are hidden (the footer says how many); change the age, or show every PR, in settings (`ctrl+o`).
+- **Review queue**: what is waiting for your review. `space` marks PRs, `r` starts **one review session per project** for the marked ones. `a` approves the highlighted PR on GitHub (`gh`) or GitLab (`glab`) after one confirming key (`a` or `enter`); once approved it leaves the queue. A PR with `[Collective]` in its title (the PR that gathers a stack whose PRs were reviewed one by one) is approved automatically each time the queue loads, if it does not have your approval yet; one try per PR, so a failure is reported once and not retried. A GitHub PR you approved before that asks for your approval again (new commits dismissed it, or the author re-requested you) gets a background review session of its own: your review command on that PR, told to look only at what changed since your approval and to approve it if nothing is crucial or dangerous, and otherwise to leave its findings. One session per PR and head commit, remembered across restarts. When such a session has finished and GitHub shows your approval on the PR's current commit, the board deletes the session; one that did not approve stays so you can read why. Turn it off with *Auto re-review* in settings (`ctrl+s`). PRs opened more than 30 days ago are hidden (the footer says how many); change the age, or show every PR, in settings (`ctrl+s`).
 - **My pull requests**: yours, sorted by what needs you: conflicts, changes requested, failing checks, unresolved threads, or *ready to merge*; your drafts sit in a *Draft* section at the very bottom. Stacked PRs stay nested. `ctrl+g` tags a PR with any tag of yours, as in the session list (`Ready for QA` is in the default list, or type a new one); the tags show on its row and `ctrl+f` finds them. `f` on a PR with conflicts starts a background session in its project that merges the base branch into the PR branch (in a new worktree), resolves the conflicts, runs the tests that cover them and pushes; never a force push, and it asks you when a conflict is ambiguous. A ⟳ marks the PR while it works. `m` merges a PR: pick `s` squash, `m` merge commit or `r` rebase on the confirm line, and its remote branch is deleted. A PR that is up to date with green checks is merged right away; one behind its base, or with checks still running, gets a background session that merges the base into the branch (normal push), waits for every pipeline to pass and then merges it, stopping to tell you if anything fails. Once merged, that session cleans up: the PR's worktrees, its local branch and its remote branch go, and `git fetch --prune` / `git worktree prune` drop the stale entries; a worktree with uncommitted changes or a branch with commits outside the PR is kept and reported. Drafts, conflicts and failing checks are refused with the reason.
-- A one-line strip under the title keeps the counts visible in every view. Refresh is every 15 minutes by default; change it (or set it to manual) in settings (`ctrl+o`), or press `ctrl+l`.
+- A one-line strip under the title keeps the counts visible in every view. Refresh is every 15 minutes by default; change it (or set it to manual) in settings (`ctrl+s`), or press `ctrl+l`.
 - GitHub uses `gh`; GitLab uses `glab`. Lookups are **read-only**; only `a` (approve) and the sessions you start change anything.
 
 **Usage, limits and disk** (optional). The bottom of the screen can show your recent usage (turns, tokens, models, projects, from your local transcripts), your **5-hour and weekly rate limits** (account-wide) with a countdown to each reset, and a **Disk** row: how full the disk is, how much is free, and how much Claude Code's own data and your sessions' git worktrees take. The bar turns yellow below 15% free and red below 5%. If your projects live on another disk, each disk gets its own row.
@@ -176,7 +176,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 1. Log in once: `gh auth login` and/or `glab auth login`.
 2. **GitHub** takes one request per refresh (`gh api graphql`): your open PRs, with their review decision, merge state, checks and stacks, and the open PRs that request your review, by name or through one of your teams (`review-requested:@me`).
 3. **Review queue chips**: `re-requested` (asked again after you reviewed), `teammate-changes-requested` and `teammate-approved` (someone other than you and the author reviewed; bots such as Copilot do not count).
-4. **Review sessions** run `/code-review:code-review <urls>` by default (from the same marketplace: `/plugin install code-review@jazis-ai-marketplace`). Change the command, and the prompt used for GitLab merge requests, in `ctrl+o` if you use something else, for example the built-in `/code-review`.
+4. **Review sessions** run `/code-review:code-review <urls>` by default (from the same marketplace: `/plugin install code-review@jazis-ai-marketplace`). Change the command, and the prompt used for GitLab merge requests, in `ctrl+s` if you use something else, for example the built-in `/code-review`.
 
 ## Account limits: setup
 
@@ -220,7 +220,7 @@ sudo apt install wl-clipboard   # Wayland
 | `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row, the old name selected so typing replaces it) · tags · pin |
 | `ctrl+x` | stop (working or idle) or delete (finished): asks first, `x` or `ctrl+x` again confirms |
 | `ctrl+f` | find |
-| `ctrl+l` · `ctrl+o` | refresh pull requests · settings |
+| `ctrl+l` · `ctrl+s` | refresh pull requests · settings |
 | `ctrl+c` | clear the typed prompt (never quits) |
 | `esc` | leave the list, clear the prompt, then quit |
 
@@ -235,7 +235,7 @@ It is a viewer plus a remote control, and it is careful about both:
 
 ## Configuration
 
-Everything lives in the board (`ctrl+o`, `ctrl+g`, `ctrl+e`). For scripts and tests there are environment variables:
+Everything lives in the board (`ctrl+s`, `ctrl+g`, `ctrl+e`). For scripts and tests there are environment variables:
 
 | Variable | Default |
 |---|---|

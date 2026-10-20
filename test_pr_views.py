@@ -459,7 +459,7 @@ class FixConflicts(unittest.TestCase):
 class Settings(unittest.TestCase):
     def setUp(self):
         self.b = board("review", review=[review(5)])
-        self.b.handle("ctrl+o")
+        self.b.handle("ctrl+s")
 
     def test_refresh_interval_cycles_with_arrows_and_zero_means_manual(self):
         self.assertEqual(self.b.pr_interval(), 15 * 60)
@@ -476,7 +476,8 @@ class Settings(unittest.TestCase):
         self.assertGreater(self.b.pr_interval(), 5 * 60)
 
     def test_draft_toggle_persists_and_requests_a_refresh(self):
-        self.b.handle("down")
+        for _ in range(2):  # past PR projects to drafts
+            self.b.handle("down")
         self.b.refresh_requested.clear()
         self.b.handle("space")
         self.assertTrue(self.b.meta.settings["include_drafts"])
@@ -486,7 +487,7 @@ class Settings(unittest.TestCase):
 
     def test_auto_re_review_is_on_until_turned_off_and_that_survives_a_restart(self):
         self.assertTrue(self.b.auto_rereview())
-        for _ in range(3):
+        for _ in range(4):
             self.b.handle("down")
         self.assertIn("[x] on", "\n".join(ab.plain(l) for l in ab.compose(self.b, 110, 30)[0]))
         self.b.handle("space")
@@ -496,7 +497,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("auto_rereview", self.b.meta.settings)
 
     def test_review_command_can_be_edited_and_reset(self):
-        for _ in range(4):
+        for _ in range(5):
             self.b.handle("down")
         self.b.handle("enter")
         self.b.handle("ctrl+u")
@@ -510,7 +511,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl"])
 
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
@@ -530,7 +531,7 @@ class Settings(unittest.TestCase):
 
 
 class ReviewQueueAge(unittest.TestCase):
-    """The review queue hides PRs opened longer ago than a setting (ctrl+o), 30 days unless changed."""
+    """The review queue hides PRs opened longer ago than a setting (ctrl+s), 30 days unless changed."""
 
     def setUp(self):
         self.b = board("review", review=[review(2), review(45), review(200)])  # opened that many days ago
@@ -545,11 +546,11 @@ class ReviewQueueAge(unittest.TestCase):
         self.assertEqual(self.b.hidden_by_age(), 2)
 
     def test_the_footer_says_how_many_are_hidden(self):
-        self.assertIn("2 older than 30 days hidden (ctrl+o)", "\n".join(ab.plain(l) for l in ab.compose(self.b, 140, 30)[0]))
+        self.assertIn("2 older than 30 days hidden (ctrl+s)", "\n".join(ab.plain(l) for l in ab.compose(self.b, 140, 30)[0]))
 
     def test_the_setting_cycles_and_zero_shows_every_pr(self):
-        self.b.handle("ctrl+o")
-        for _ in range(2):
+        self.b.handle("ctrl+s")
+        for _ in range(3):
             self.b.handle("down")
         self.b.handle("right")
         self.assertEqual((self.b.meta.settings["review_max_age_days"], self.shown()), (60, [45, 2]))
@@ -562,8 +563,8 @@ class ReviewQueueAge(unittest.TestCase):
 
     def test_the_default_is_not_written_to_the_settings_file(self):
         self.b.meta.settings["review_max_age_days"] = 14
-        self.b.handle("ctrl+o")
-        for _ in range(2):
+        self.b.handle("ctrl+s")
+        for _ in range(3):
             self.b.handle("down")
         self.b.handle("right")
         self.assertNotIn("review_max_age_days", self.b.meta.settings)
@@ -832,6 +833,66 @@ class TagMyPrs(unittest.TestCase):
         self.assertIsNone(b.tagpicker)
 
 
+class ChoosePrProjects(unittest.TestCase):
+    """ctrl+s → PR projects: tick the projects looked at for pull requests; by default, every project with sessions."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.extra = str(Path(self.tmp) / "web-app")
+        Path(self.extra).mkdir()
+        self.b = board("review")
+        self.b.set_sessions([session(1), session(2, "scum-map")])
+        self.b.known = [("web-app", self.extra)]
+        self.b.handle("ctrl+s")
+        self.b.handle("down")  # PR projects
+        self.b.handle("enter")
+
+    def screen(self):
+        return "\n".join(ab.plain(l) for l in ab.compose(self.b, 130, 34)[0])
+
+    def row(self, name):
+        return next(l for l in self.screen().splitlines() if f"] {name}" in l)
+
+    def test_by_default_every_project_with_sessions_is_ticked(self):
+        self.assertIsNone(self.b.chosen_pr_projects())
+        self.assertIn("[x] billing-api", self.row("billing-api"))
+        self.assertIn("[x] scum-map", self.row("scum-map"))
+        self.assertIn("[ ] web-app", self.row("web-app"))  # known from Claude Code, no sessions
+
+    def tick(self, name):
+        self.b.settingsui["projects"] = [n for n, _ in self.b.pr_project_choices()].index(name)
+        self.b.handle("space")
+
+    def test_ticking_saves_the_choice_and_asks_for_a_refresh(self):
+        self.b.refresh_requested.clear()
+        self.tick("web-app")  # joins
+        self.tick("scum-map")  # leaves
+        self.assertEqual(ab.Meta(self.b.meta.path).settings["pr_projects"], ["/srv/www/billing-api", self.extra])
+        self.assertTrue(self.b.refresh_requested.is_set())
+        self.b.handle("esc")
+        self.assertIn("2 chosen", self.screen())
+
+    def test_d_goes_back_to_every_project_with_sessions(self):
+        self.b.handle("space")
+        self.b.handle("char", "d")
+        self.assertNotIn("pr_projects", self.b.meta.settings)
+
+    def test_the_loader_checks_exactly_the_chosen_projects(self):
+        self.b.meta.set_setting("pr_projects", [self.extra])
+        asked = []
+
+        def run(cmd, **kw):
+            asked.append(cmd[2] if cmd[0] == "git" else "")
+            return SimpleNamespace(returncode=0, stdout="git@github.com:acme/web-app.git\n", stderr="")
+
+        self.assertEqual([r.repo for r in ab.PrLoader(self.b, run=run).projects().values()], ["acme/web-app"])
+        self.assertEqual([a for a in asked if a], [self.extra])  # not the projects with sessions
+
+    def test_without_a_choice_the_loader_keeps_using_the_projects_with_sessions(self):
+        run = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=f"git@github.com:acme/{cmd[2].rsplit('/', 1)[-1]}.git\n", stderr="")
+        self.assertEqual(sorted(r.repo for r in ab.PrLoader(self.b, run=run).projects().values()), ["acme/billing-api", "acme/scum-map"])
+
+
 class RefreshMessage(unittest.TestCase):
     """ctrl+l says "refreshing…"; that note must give way to the outcome instead of staying on screen."""
 
@@ -936,7 +997,7 @@ class ContextualHelp(unittest.TestCase):
     def test_every_view_can_switch_views_refresh_and_open_settings_and_leave_with_esc(self):
         for mode in ("status", "review", "mine"):
             keys = self.keys(mode)
-            for needed in ("alt+← / alt+→", "ctrl+l", "ctrl+o", "esc"):
+            for needed in ("alt+← / alt+→", "ctrl+l", "ctrl+s", "esc"):
                 self.assertIn(needed, keys, f"{mode} lacks {needed}")
 
     def test_no_key_is_listed_twice_in_one_view(self):

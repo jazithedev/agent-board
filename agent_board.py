@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1117,7 +1117,7 @@ class Effect:
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
     ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+o", "settings: PR refresh interval, drafts, review queue age, auto re-review, review command"),
+    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1699,6 +1699,24 @@ class Board:
                 have.add(path)
         return listed
 
+    def chosen_pr_projects(self) -> Optional[list[str]]:
+        """The folders checked for pull requests, if you chose them (ctrl+s); None means every project with sessions."""
+        chosen = self.meta.settings.get("pr_projects")
+        return [str(p) for p in chosen] if isinstance(chosen, list) else None
+
+    def pr_project_choices(self) -> list[tuple[str, str]]:
+        """Every project the board knows, plus chosen folders it no longer lists: (name, path)."""
+        listed = self.all_projects()
+        have = {p for _, p in listed}
+        return listed + [(project_of("", p)[0], p) for p in self.chosen_pr_projects() or [] if p not in have]
+
+    def toggle_pr_project(self, path: str) -> None:
+        chosen = self.chosen_pr_projects()
+        if chosen is None:  # the first change starts from what was checked so far: the projects with sessions
+            chosen = [p for _, p in self.projects()]
+        self.meta.set_setting("pr_projects", [p for p in chosen if p != path] if path in chosen else chosen + [path])
+        self.refresh_requested.set()
+
     def refresh_known(self, max_age: float = 30.0) -> None:
         if not self.known_projects_fn or self.now() - self.known_at < max_age:
             return
@@ -1822,7 +1840,7 @@ class Board:
         return days if days in REVIEW_AGE_CHOICES else DEFAULT_REVIEW_AGE
 
     def review_prs(self) -> list:
-        """The review queue without PRs opened longer ago than the setting allows (ctrl+o)."""
+        """The review queue without PRs opened longer ago than the setting allows (ctrl+s)."""
         if not self.prs:
             return []
         days = self.review_age_days()
@@ -1927,7 +1945,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
+        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -1944,12 +1962,32 @@ class Board:
         elif name == "review_cmd_gl":
             self.meta.set_setting("review_command_gitlab", None if text in ("", DEFAULT_REVIEW_COMMAND_GITLAB) else text)
 
+    def _handle_pr_projects(self, key: str, ch: str) -> None:
+        """The PR projects list inside settings: space or enter ticks a project, d goes back to the default, esc returns."""
+        ui = self.settingsui
+        items = self.pr_project_choices()
+        i = ui["projects"] = min(ui["projects"], max(0, len(items) - 1))
+        if key in ("esc", "left"):
+            ui["projects"] = None
+        elif key == "up":
+            ui["projects"] = max(0, i - 1)
+        elif key == "down":
+            ui["projects"] = min(max(0, len(items) - 1), i + 1)
+        elif key in ("space", "enter") and items:
+            self.toggle_pr_project(items[i][1])
+        elif key == "char" and ch == "d":
+            self.meta.set_setting("pr_projects", None)
+            self.refresh_requested.set()
+        return None
+
     def _handle_settings(self, key: str, ch: str) -> None:
         ui = self.settingsui
         fields = self.settings_fields()
         ui["idx"] = min(ui["idx"], len(fields) - 1)
         name = fields[ui["idx"]][0]
         edit = ui["edit"]
+        if ui.get("projects") is not None:
+            return self._handle_pr_projects(key, ch)
         if edit is not None:
             if key == "esc":
                 ui["edit"] = None
@@ -1963,7 +2001,7 @@ class Board:
             elif key in ("char", "space"):
                 edit["text"] += ch or " "
             return None
-        if key in ("esc", "ctrl+o"):
+        if key in ("esc", "ctrl+s"):
             self.settingsui = None
         elif key == "up":
             ui["idx"] = max(0, ui["idx"] - 1)
@@ -1977,13 +2015,16 @@ class Board:
         elif name == "drafts" and key in ("enter", "space", "left", "right"):
             self.meta.set_setting("include_drafts", not self.meta.settings.get("include_drafts", False) or None)
             self.refresh_requested.set()
+        elif name == "pr_projects" and key in ("enter", "space", "right"):
+            self.refresh_known(0)
+            ui["projects"] = 0
         elif name == "rereview" and key in ("enter", "space", "left", "right"):
             self.meta.set_setting("auto_rereview", None if not self.auto_rereview() else False)  # on unless turned off
         elif name == "age" and key in ("left", "right", "enter", "space"):
             i = REVIEW_AGE_CHOICES.index(self.review_age_days())
             days = REVIEW_AGE_CHOICES[(i + (-1 if key == "left" else 1)) % len(REVIEW_AGE_CHOICES)]
             self.meta.set_setting("review_max_age_days", None if days == DEFAULT_REVIEW_AGE else days)
-        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview"):
+        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "pr_projects"):
             ui["edit"] = {"field": name, "text": self.setting_text(name)}
         return None
 
@@ -2040,7 +2081,7 @@ class Board:
                 return effect
         elif key == "ctrl+l":
             return Effect("refresh_prs")
-        elif key == "ctrl+o":
+        elif key == "ctrl+s":
             self.settingsui = {"idx": 0, "edit": None}
         elif key == "ctrl+f":
             self.edit = {"kind": "find", "text": self.query, "sid": "", "cursor": len(self.query)}
@@ -2438,7 +2479,7 @@ class Board:
             self.confirm = {"kind": "stop" if s.group == "working" else "remove", "sid": s.id}  # idle and finished ones are deleted
         elif key == "ctrl+l":
             return Effect("refresh_prs")
-        elif key == "ctrl+o":
+        elif key == "ctrl+s":
             self.settingsui = {"idx": 0, "edit": None}
         elif key == "ctrl+f":
             self.edit = {"kind": "find", "text": self.query, "sid": "", "cursor": len(self.query)}
@@ -2704,6 +2745,10 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
             shown: list[Seg] = [("◂ ", "faint"), (value, "bold"), (" ▸", "faint")]
         elif name == "drafts":
             shown = [("[x] yes" if s.get("include_drafts") else "[ ] no", "done" if s.get("include_drafts") else "faint")]
+        elif name == "pr_projects":
+            chosen = board.chosen_pr_projects()
+            value = "every project with sessions" if chosen is None else f"{len(chosen)} chosen"
+            shown = [(value, "bold"), ("  enter to choose", "faint")]
         elif name == "rereview":
             on_ = board.auto_rereview()
             shown = [("[x] on" if on_ else "[ ] off", "done" if on_ else "faint"), ("  a session re-reviews PRs you approved that changed", "faint")]
@@ -2717,7 +2762,32 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
             else:
                 shown = [(fit(text, max(10, width - 44)) if text else "not set (enter to add)", "dim" if text else "faint")]
         rows.append([arrow, (f"{label:<24}", "name_sel" if on else "name")] + shown + [(" ", "normal")])
-    _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, "settings"), width)
+    if ui.get("projects") is not None:
+        rows = pr_project_rows(board, len(lines) - HEADER_ROWS - 8)
+    _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, "settings · PR projects" if ui.get("projects") is not None else "settings"), width)
+
+
+def pr_project_rows(board: Board, visible: int) -> list[list[Seg]]:
+    """The PR projects checklist: what is ticked is looked at for pull requests on every refresh."""
+    items = board.pr_project_choices()
+    chosen = board.chosen_pr_projects()
+    with_sessions = {p for _, p in board.projects()}
+    ticked = set(with_sessions if chosen is None else chosen)
+    idx = board.settingsui["projects"]
+    rows: list[list[Seg]] = [[(" every project with sessions, until you change it" if chosen is None else f" {len(ticked & {p for _, p in items})} chosen", "dim")], [("", "normal")]]
+    visible = max(3, visible)
+    start = max(0, min(idx - visible // 2, len(items) - visible))
+    for i in range(start, min(len(items), start + visible)):
+        name, path = items[i]
+        on = i == idx
+        rows.append([
+            (" ▸ " if on else "   ", "accent"), ("[x] " if path in ticked else "[ ] ", "done" if path in ticked else "faint"),
+            (f"{fit(name, 24):<25}", "name_sel" if on else "name"), (fit(path, 40), "faint"), ("  has sessions" if path in with_sessions else "", "faint"), (" ", "normal"),
+        ])
+    if not items:
+        rows.append([("   no projects known yet", "faint")])
+    rows += [[("", "normal")], [("   space tick · d back to every project with sessions · esc back", "faint")]]
+    return rows
 
 
 def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[list[Line], Optional[tuple[int, int]]]:
@@ -2869,7 +2939,7 @@ def prompt_area(board: Board, width: int, inner: int, max_rows: int) -> tuple[li
         text = f"{n} marked for review" if n else ("space marks a PR for review, r starts a review session" if board.mode == "review" else "enter opens a PR; a ⟳ marks a PR a session is already working on")
         old = board.hidden_by_age() if board.mode == "review" and not n else 0
         if old:
-            text += f" · {old} older than {board.review_age_days()} days hidden (ctrl+o)"
+            text += f" · {old} older than {board.review_age_days()} days hidden (ctrl+s)"
         return [Line([(" ", "normal"), ("◆ " if n else "  ", "accent"), (text, "bold" if n else "faint")])], None, None
     pre = [(" ❯ ", "accent")]
     target_name, _ = board.start_target()
@@ -3198,9 +3268,9 @@ def _hint_segs(board: Board) -> list[Seg]:
             else "↑/↓ move · enter toggle · type to filter or create · ctrl+r rename · ctrl+x delete · esc done"
         )
     elif board.mode == "review":
-        hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+l refresh · ctrl+o settings · esc back"
+        hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+l refresh · ctrl+s settings · esc back"
     elif board.mode == "mine":
-        hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+o settings · alt+←/→ tabs · esc back"
+        hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+s settings · alt+←/→ tabs · esc back"
     elif board.sel:
         s = board.selected()
         stop = "stop" if s and s.group == "working" else "delete"
@@ -4055,8 +4125,9 @@ class PrLoader(threading.Thread):
 
     def projects(self) -> dict[str, prs.Remote]:
         found: dict[str, prs.Remote] = {}
-        for s in list(self.board.sessions):
-            path = s.project_path
+        chosen = self.board.chosen_pr_projects()
+        paths = chosen if chosen is not None else [s.project_path for s in list(self.board.sessions)]
+        for path in paths:
             if not path or path in found:
                 continue
             if path not in self.remotes:

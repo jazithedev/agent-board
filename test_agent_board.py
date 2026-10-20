@@ -1264,7 +1264,7 @@ class Branding(unittest.TestCase):
 
     def test_overlays_stay_clear_of_the_header_rows(self):
         b = board([make(1)])
-        for opener in ("ctrl+p", "ctrl+o"):
+        for opener in ("ctrl+p", "ctrl+s"):
             b.handle(opener)
             lines = [ab.plain(l) for l in ab.compose(b, 110, 24)[0]]
             self.assertIn("Agent Board", lines[1])
