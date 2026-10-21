@@ -496,6 +496,17 @@ class Settings(unittest.TestCase):
         self.b.handle("space")
         self.assertNotIn("auto_rereview", self.b.meta.settings)
 
+    def test_team_reviews_are_kept_until_turned_off_and_that_survives_a_restart(self):
+        self.b.settingsui["idx"] = [n for n, _ in self.b.settings_fields()].index("team_reviews")
+        self.assertIn("[x] kept", "\n".join(ab.plain(l) for l in ab.compose(self.b, 120, 30)[0]))
+        self.b.refresh_requested.clear()
+        self.b.handle("space")
+        self.assertIs(ab.Meta(self.b.meta.path).settings["keep_team_reviews"], False)
+        self.assertTrue(self.b.refresh_requested.is_set())
+        self.assertIn("[ ] dropped", "\n".join(ab.plain(l) for l in ab.compose(self.b, 120, 30)[0]))
+        self.b.handle("space")
+        self.assertNotIn("keep_team_reviews", self.b.meta.settings)
+
     def test_review_command_can_be_edited_and_reset(self):
         for _ in range(5):
             self.b.handle("down")
@@ -511,7 +522,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews"])
 
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):

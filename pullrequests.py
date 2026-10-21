@@ -11,7 +11,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -354,6 +354,11 @@ def glab(run: Runner, endpoint: str, home: str) -> object:
 _PR_FIELDS = "number title url createdAt updatedAt isDraft repository { nameWithOwner } author { login }"
 _PEOPLE = """reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
       latestReviews(first: 20) { nodes { state author { __typename login } } }"""
+_REVIEW_HISTORY = """approvals: reviews(states: APPROVED, last: 50) { nodes { author { login } } }
+      dismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], last: 50) {
+        nodes { ... on ReviewDismissedEvent { previousReviewState review { author { login } } } } }"""
+_REQUESTS = """requests: timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 50) {
+        nodes { ... on ReviewRequestedEvent { requestedReviewer { ... on User { login } ... on Team { slug organization { login } } } } } }"""
 GITHUB_QUERY = f"""query {{
   viewer {{ login }}
   mine: search(query: "is:pr is:open author:@me archived:false", type: ISSUE, first: 100) {{
@@ -364,22 +369,68 @@ GITHUB_QUERY = f"""query {{
   review: search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 100) {{
     nodes {{ ... on PullRequest {{ {_PR_FIELDS} headRefOid
       {_PEOPLE}
-      approvals: reviews(states: APPROVED, last: 50) {{ nodes {{ author {{ login }} }} }}
-      dismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], last: 50) {{
-        nodes {{ ... on ReviewDismissedEvent {{ previousReviewState review {{ author {{ login }} }} }} }} }} }} }}
+      {_REVIEW_HISTORY} }} }}
   }}
 }}"""
+
+
+def github_query(repos: list[str], since: Optional[str]) -> str:
+    """GITHUB_QUERY, plus (when `since` is given) the open PRs of these repositories with their review-request history.
+
+    GitHub drops a team's review request once any member reviews, so a PR asked of your team leaves review-requested:@me
+    as soon as a teammate approves; the history still shows who was asked."""
+    if since is None or not repos:
+        return GITHUB_QUERY
+    scope = " ".join(f"repo:{r}" for r in repos) + (f" created:>={since}" if since else "")
+    team = f"""
+  team: search(query: "is:pr is:open archived:false -author:@me -reviewed-by:@me {scope} sort:updated-desc", type: ISSUE, first: 100) {{
+    nodes {{ ... on PullRequest {{ {_PR_FIELDS} headRefOid
+      {_PEOPLE}
+      {_REVIEW_HISTORY}
+      {_REQUESTS} }} }}
+  }}
+}}"""
+    return GITHUB_QUERY[: GITHUB_QUERY.rstrip().rfind("}")] + team.lstrip("\n")
+
+
+def my_teams(run: Runner) -> set[str]:
+    """Your GitHub teams as "org/slug" (lower case); empty when gh cannot list them (the token lacks read:org)."""
+    try:
+        proc = run(["gh", "api", "user/teams", "--paginate", "--jq", '.[] | .organization.login + "/" + .slug'], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {l.strip().lower() for l in proc.stdout.splitlines() if l.strip()} if proc.returncode == 0 else set()
+
+
+def asked_of(node: dict, me: str, teams: set[str]) -> bool:
+    """Whether you, or a team of yours, was ever asked to review this PR."""
+    for n in _nodes(node.get("requests")):
+        who = n.get("requestedReviewer") or {}
+        if who.get("login") == me:
+            return True
+        if who.get("slug") and f"{(who.get('organization') or {}).get('login', '')}/{who['slug']}".lower() in teams:
+            return True
+    return False
 MERGE_TRIES = 3  # GitHub works merge states out lazily: a cold query reports UNKNOWN, the next one the real value
 
 
-def fetch_github(remotes: dict[str, Remote], settings: dict, run: Runner, errors: list[str], sleep: Callable[[float], None] = time.sleep) -> tuple[list[MyPr], list[ReviewPr]]:
+def fetch_github(
+    remotes: dict[str, Remote], settings: dict, run: Runner, errors: list[str], sleep: Callable[[float], None] = time.sleep, now: Optional[float] = None
+) -> tuple[list[MyPr], list[ReviewPr]]:
     """Your open PRs and the PRs that request your review, in one request (asked again while merge states are unknown)."""
     scope = {r.repo.lower() for r in remotes.values() if r.provider == "github"}
     if not scope:
         return [], []
+    keep_team = settings.get("keep_team_reviews", True) is not False
+    teams = my_teams(run) if keep_team else set()
+    days = settings.get("review_max_age_days", 30)
+    since = None
+    if keep_team and teams:
+        since = datetime.fromtimestamp((now or time.time()) - int(days) * 86400, tz=timezone.utc).strftime("%Y-%m-%d") if days else ""
+    query = github_query(sorted(scope), since)
     try:
         for attempt in range(MERGE_TRIES):
-            data = (_json(run, ["gh", "api", "graphql", "-f", f"query={GITHUB_QUERY}"]) or {}).get("data") or {}
+            data = (_json(run, ["gh", "api", "graphql", "-f", f"query={query}"]) or {}).get("data") or {}
             mine_nodes = [n for n in _nodes(data.get("mine")) if n.get("number")]
             if attempt == MERGE_TRIES - 1 or not any(n.get("mergeStateStatus") == "UNKNOWN" for n in mine_nodes):
                 break
@@ -387,6 +438,13 @@ def fetch_github(remotes: dict[str, Remote], settings: dict, run: Runner, errors
         me = _login(data.get("viewer"))
         mine = [github_my_pr(n) for n in mine_nodes]
         review = [github_review_pr(n, me) for n in _nodes(data.get("review")) if n.get("number")]
+        listed = {p.key for p in review}
+        for n in _nodes(data.get("team")):  # asked of you or your team, then a teammate reviewed: GitHub dropped the request
+            if n.get("number") and _login(n.get("author")) != me and not _reviews(n).get(me) and asked_of(n, me, teams):
+                p = github_review_pr(n, me)
+                if p.key not in listed:
+                    review.append(p)
+                    listed.add(p.key)
     except (FetchError, AttributeError, KeyError, TypeError, ValueError) as exc:
         errors.append(f"GitHub (pull requests): {exc}")
         return [], []
@@ -486,7 +544,7 @@ def fetch_all(
     """`projects` maps a project's folder to its git remote; only those repositories are looked at."""
     remotes = {path: r for path, r in projects.items()}
     errors: list[str] = []
-    gh_mine, gh_review = fetch_github(remotes, settings, run, errors, sleep)
+    gh_mine, gh_review = fetch_github(remotes, settings, run, errors, sleep, now)
     gl_mine, gl_review = fetch_gitlab(remotes, settings, run, errors, home)
     return PrData(
         mine=link_stacks(gh_mine + gl_mine), review=sorted(gh_review + gl_review, key=lambda p: p.created_at),

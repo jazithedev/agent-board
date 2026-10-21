@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -146,6 +147,8 @@ class FakeWorld:
         self.gl_mine = []
         self.gl_review = []
         self.gl_approvals = {}
+        self.teams = []  # "org/slug" lines from gh api user/teams
+        self.team = []  # the team search's PRs, with their review-request history
 
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
@@ -153,12 +156,14 @@ class FakeWorld:
         if key in self.fail:
             return SimpleNamespace(returncode=1, stdout="", stderr=f"{key} exploded\n")
         ok = lambda data: SimpleNamespace(returncode=0, stdout=data if isinstance(data, str) else json.dumps(data), stderr="")
+        if key == "gh" and cmd[2] == "user/teams":
+            return ok("\n".join(self.teams) + ("\n" if self.teams else ""))
         if key == "gh":
             mine = self.mine
             if self.merge_unknown_for:
                 self.merge_unknown_for -= 1
                 mine = [{**n, "mergeStateStatus": "UNKNOWN"} for n in mine]
-            return ok({"data": {"viewer": {"login": "me"}, "mine": {"nodes": mine}, "review": {"nodes": self.review}}})
+            return ok({"data": {"viewer": {"login": "me"}, "mine": {"nodes": mine}, "review": {"nodes": self.review}, "team": {"nodes": self.team}}})
         endpoint = cmd[-1]
         if endpoint == "user":
             return ok({"username": "me"})
@@ -209,7 +214,7 @@ class Fetching(unittest.TestCase):
         self.world.mine = [mine_node("octo/live-chat", 1)]
         self.world.review = [review_node("octo/live-chat", 5)]
         self.fetch()
-        github = [c for c in self.world.calls if c[0] == "gh"]
+        github = [c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"]]
         self.assertEqual(len(github), 1)
         self.assertEqual(github[0][:3], ["gh", "api", "graphql"])
         self.assertFalse(any(c[0] == "python3" for c in self.world.calls))
@@ -223,7 +228,7 @@ class Fetching(unittest.TestCase):
         self.world.merge_unknown_for = 1
         data = self.fetch()
         self.assertEqual(data.mine[0].merge, "clean")
-        self.assertEqual(len([c for c in self.world.calls if c[0] == "gh"]), 2)
+        self.assertEqual(len([c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"]]), 2)
         self.assertEqual(self.slept, [1.0])
 
     def test_merge_states_still_unknown_after_three_tries_are_shown_as_unknown(self):
@@ -231,7 +236,7 @@ class Fetching(unittest.TestCase):
         self.world.merge_unknown_for = 5
         data = self.fetch()
         self.assertEqual(data.mine[0].merge, "unknown")
-        self.assertEqual(len([c for c in self.world.calls if c[0] == "gh"]), 3)
+        self.assertEqual(len([c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"]]), 3)
 
     def test_github_is_not_queried_when_no_project_is_on_github(self):
         self.projects = {"/srv/www/scum-map": pr.Remote("gitlab", "scum-map/scum-map")}
@@ -377,3 +382,54 @@ class ViewerApproved(unittest.TestCase):
 
     def test_no_answer_is_none(self):
         self.assertIsNone(pr.viewer_approved("o/r", 1, lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502")))
+
+
+class TeamReviews(unittest.TestCase):
+    """A PR asked of your team leaves review-requested:@me once a teammate reviews it; the board keeps it in the queue."""
+
+    def setUp(self):
+        self.world = FakeWorld()
+        self.world.teams = ["Octo/BE-Team"]
+        self.projects = {"/srv/www/live-chat": pr.Remote("github", "octo/live-chat")}
+
+    def team_node(self, n, asked="be-team", reviews=None, author="maria"):
+        who = {"login": asked} if asked == "me" else {"slug": asked, "organization": {"login": "octo"}}
+        return review_node("octo/live-chat", n, author=author, requested=(), reviews=reviews or {"tom": "APPROVED"},
+                           requests={"nodes": [{"requestedReviewer": who}]})
+
+    def fetch(self, **settings):
+        return pr.fetch_all(self.projects, settings, self.world, NOW, home="/home/x", sleep=lambda s: None)
+
+    def test_a_pr_asked_of_your_team_stays_after_a_teammate_approves(self):
+        self.world.team = [self.team_node(7)]
+        [p] = self.fetch().review
+        self.assertEqual((p.number, p.flags), (7, ("teammate-approved",)))
+        query = next(c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"])[-1]
+        self.assertIn("team: search(", query)
+        self.assertIn("repo:octo/live-chat", query)
+        self.assertIn("-reviewed-by:@me", query)
+        self.assertIn(f"created:>={time.strftime('%Y-%m-%d', time.gmtime(NOW - 30 * 86400))}", query)
+
+    def test_one_asked_of_you_by_name_stays_too(self):
+        self.world.team = [self.team_node(8, asked="me")]
+        self.assertEqual([p.number for p in self.fetch().review], [8])
+
+    def test_other_teams_your_own_reviews_and_duplicates_are_left_out(self):
+        self.world.team = [self.team_node(9, asked="frontend"), self.team_node(10, reviews={"me": "COMMENTED"}), self.team_node(5)]
+        self.world.review = [review_node("octo/live-chat", 5)]
+        self.assertEqual([p.number for p in self.fetch().review], [5])
+
+    def test_the_setting_off_or_no_teams_means_no_team_search(self):
+        self.world.team = [self.team_node(7)]
+        self.assertEqual(self.fetch(keep_team_reviews=False).review, [])
+        self.assertFalse(any(c[:3] == ["gh", "api", "user/teams"] for c in self.world.calls))
+        self.world.teams = []
+        self.world.calls.clear()
+        self.assertEqual(self.fetch().review, [])
+        self.assertNotIn("team: search(", next(c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"])[-1])
+
+    def test_showing_every_pr_drops_the_age_bound(self):
+        self.fetch(review_max_age_days=0)
+        query = next(c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"])[-1]
+        self.assertIn("team: search(", query)
+        self.assertNotIn("created:>=", query)

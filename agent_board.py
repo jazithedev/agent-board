@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1117,7 +1117,7 @@ class Effect:
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
     ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command"),
+    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1945,7 +1945,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt")]
+        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -2018,13 +2018,16 @@ class Board:
         elif name == "pr_projects" and key in ("enter", "space", "right"):
             self.refresh_known(0)
             ui["projects"] = 0
+        elif name == "team_reviews" and key in ("enter", "space", "left", "right"):
+            self.meta.set_setting("keep_team_reviews", None if self.meta.settings.get("keep_team_reviews") is False else False)  # on unless turned off
+            self.refresh_requested.set()
         elif name == "rereview" and key in ("enter", "space", "left", "right"):
             self.meta.set_setting("auto_rereview", None if not self.auto_rereview() else False)  # on unless turned off
         elif name == "age" and key in ("left", "right", "enter", "space"):
             i = REVIEW_AGE_CHOICES.index(self.review_age_days())
             days = REVIEW_AGE_CHOICES[(i + (-1 if key == "left" else 1)) % len(REVIEW_AGE_CHOICES)]
             self.meta.set_setting("review_max_age_days", None if days == DEFAULT_REVIEW_AGE else days)
-        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "pr_projects"):
+        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "pr_projects", "team_reviews"):
             ui["edit"] = {"field": name, "text": self.setting_text(name)}
         return None
 
@@ -2749,6 +2752,9 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
             chosen = board.chosen_pr_projects()
             value = "every project with sessions" if chosen is None else f"{len(chosen)} chosen"
             shown = [(value, "bold"), ("  enter to choose", "faint")]
+        elif name == "team_reviews":
+            keep = s.get("keep_team_reviews") is not False
+            shown = [("[x] kept" if keep else "[ ] dropped", "done" if keep else "faint"), ("  a PR asked of your team, once a teammate reviewed it", "faint")]
         elif name == "rereview":
             on_ = board.auto_rereview()
             shown = [("[x] on" if on_ else "[ ] off", "done" if on_ else "faint"), ("  a session re-reviews PRs you approved that changed", "faint")]
