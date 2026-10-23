@@ -149,6 +149,7 @@ class FakeWorld:
         self.gl_approvals = {}
         self.teams = []  # "org/slug" lines from gh api user/teams
         self.team = []  # the team search's PRs, with their review-request history
+        self.dismissed = []  # the search for PRs you reviewed, where your approval may have been dismissed
 
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
@@ -163,7 +164,8 @@ class FakeWorld:
             if self.merge_unknown_for:
                 self.merge_unknown_for -= 1
                 mine = [{**n, "mergeStateStatus": "UNKNOWN"} for n in mine]
-            return ok({"data": {"viewer": {"login": "me"}, "mine": {"nodes": mine}, "review": {"nodes": self.review}, "team": {"nodes": self.team}}})
+            return ok({"data": {"viewer": {"login": "me"}, "mine": {"nodes": mine}, "review": {"nodes": self.review}, "team": {"nodes": self.team},
+                                "dismissed": {"nodes": self.dismissed}}})
         endpoint = cmd[-1]
         if endpoint == "user":
             return ok({"username": "me"})
@@ -433,3 +435,39 @@ class TeamReviews(unittest.TestCase):
         query = next(c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"])[-1]
         self.assertIn("team: search(", query)
         self.assertNotIn("created:>=", query)
+
+
+class DismissedApprovals(unittest.TestCase):
+    """New commits dismiss your approval and nobody asks again: no review request is left, yet it needs you."""
+
+    def setUp(self):
+        self.world = FakeWorld()
+        self.projects = {"/srv/www/live-chat": pr.Remote("github", "octo/live-chat")}
+
+    def node(self, n, mine="DISMISSED", was="APPROVED", author="maria"):
+        return review_node("octo/live-chat", n, author=author, requested=(), reviews={"me": mine, "tom": "APPROVED"},
+                           dismissals={"nodes": [{"previousReviewState": was, "review": {"author": {"login": "me"}}}]})
+
+    def fetch(self, **settings):
+        return pr.fetch_all(self.projects, settings, self.world, NOW, home="/home/x", sleep=lambda s: None)
+
+    def test_a_dismissed_approval_brings_the_pr_back_for_re_approval(self):
+        self.world.dismissed = [self.node(29)]
+        [p] = self.fetch().review
+        self.assertEqual((p.number, p.approved_before, p.approved_by_me, p.needs_reapproval), (29, True, False, True))
+        query = next(c for c in self.world.calls if c[:3] == ["gh", "api", "graphql"])[-1]
+        self.assertIn("dismissed: search(", query)
+        self.assertIn("reviewed-by:@me repo:octo/live-chat", query)
+
+    def test_it_does_not_need_your_team_settings(self):
+        self.world.dismissed = [self.node(29)]
+        self.assertEqual([p.number for p in self.fetch(keep_team_reviews=False).review], [29])
+
+    def test_a_standing_approval_a_dismissed_change_request_a_later_comment_or_your_own_pr_stay_out(self):
+        self.world.dismissed = [self.node(1, mine="APPROVED"), self.node(2, was="CHANGES_REQUESTED"), self.node(3, mine="COMMENTED"), self.node(4, author="me")]
+        self.assertEqual(self.fetch().review, [])
+
+    def test_one_already_requested_is_listed_once(self):
+        self.world.dismissed = [self.node(5)]
+        self.world.review = [review_node("octo/live-chat", 5)]
+        self.assertEqual([p.number for p in self.fetch().review], [5])

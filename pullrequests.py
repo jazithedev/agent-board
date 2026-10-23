@@ -375,22 +375,31 @@ GITHUB_QUERY = f"""query {{
 
 
 def github_query(repos: list[str], since: Optional[str]) -> str:
-    """GITHUB_QUERY, plus (when `since` is given) the open PRs of these repositories with their review-request history.
+    """GITHUB_QUERY, plus the open PRs of these repositories you reviewed, and (when `since` is given) all the others with
+    their review-request history.
 
-    GitHub drops a team's review request once any member reviews, so a PR asked of your team leaves review-requested:@me
-    as soon as a teammate approves; the history still shows who was asked."""
-    if since is None or not repos:
+    GitHub drops a review request once you review, and a team's once any member reviews; new commits that dismiss your
+    approval do not bring yours back, and a PR asked of your team leaves review-requested:@me as soon as a teammate
+    approves. Your reviews and the request history still show both."""
+    if not repos:
         return GITHUB_QUERY
-    scope = " ".join(f"repo:{r}" for r in repos) + (f" created:>={since}" if since else "")
-    team = f"""
+    repo_scope = " ".join(f"repo:{r}" for r in repos)
+    extra = f"""
+  dismissed: search(query: "is:pr is:open archived:false -author:@me reviewed-by:@me {repo_scope} sort:updated-desc", type: ISSUE, first: 100) {{
+    nodes {{ ... on PullRequest {{ {_PR_FIELDS} headRefOid
+      {_PEOPLE}
+      {_REVIEW_HISTORY} }} }}
+  }}"""
+    if since is not None:
+        scope = repo_scope + (f" created:>={since}" if since else "")
+        extra += f"""
   team: search(query: "is:pr is:open archived:false -author:@me -reviewed-by:@me {scope} sort:updated-desc", type: ISSUE, first: 100) {{
     nodes {{ ... on PullRequest {{ {_PR_FIELDS} headRefOid
       {_PEOPLE}
       {_REVIEW_HISTORY}
       {_REQUESTS} }} }}
-  }}
-}}"""
-    return GITHUB_QUERY[: GITHUB_QUERY.rstrip().rfind("}")] + team.lstrip("\n")
+  }}"""
+    return GITHUB_QUERY[: GITHUB_QUERY.rstrip().rfind("}")] + extra.lstrip("\n") + "\n}"
 
 
 def my_teams(run: Runner) -> set[str]:
@@ -439,6 +448,12 @@ def fetch_github(
         mine = [github_my_pr(n) for n in mine_nodes]
         review = [github_review_pr(n, me) for n in _nodes(data.get("review")) if n.get("number")]
         listed = {p.key for p in review}
+        for n in _nodes(data.get("dismissed")):  # new commits dismissed your approval and nobody asked again
+            if n.get("number") and _login(n.get("author")) != me and _reviews(n).get(me) == "DISMISSED" and me in approvers(n):
+                p = github_review_pr(n, me)
+                if p.key not in listed:
+                    review.append(p)
+                    listed.add(p.key)
         for n in _nodes(data.get("team")):  # asked of you or your team, then a teammate reviewed: GitHub dropped the request
             if n.get("number") and _login(n.get("author")) != me and not _reviews(n).get(me) and asked_of(n, me, teams):
                 p = github_review_pr(n, me)
