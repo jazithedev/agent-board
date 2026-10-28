@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.27.2"
+__version__ = "0.27.3"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -3833,6 +3833,17 @@ def _theme() -> dict[str, tuple[int, int, int]]:
     return t
 
 
+def sync_size(scr) -> None:
+    """Follow the real terminal size, for a resize curses never reported (one made while a session was attached)."""
+    try:
+        cols, rows = os.get_terminal_size(sys.stdout.fileno())
+    except OSError:
+        return
+    if (rows, cols) != scr.getmaxyx():
+        curses.resizeterm(rows, cols)
+        scr.clearok(True)
+
+
 class Painter:
     SEL_BG = 236
 
@@ -4595,6 +4606,7 @@ def main_loop(scr, demo: bool) -> None:
         DiskLoader(board).start()
     try:
         while True:
+            sync_size(scr)
             h, w = scr.getmaxyx()
             if w < 50 or h < 10:
                 scr.erase()
