@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.27.3"
+__version__ = "0.27.4"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1218,6 +1218,7 @@ class Board:
         self.launch_cwd = launch_cwd
         self.mode = self.grouping  # status | project (the Sessions tab, grouped that way) | review | mine
         self.input = ""
+        self.prompt_widths: Optional[tuple[int, int]] = None  # (first row, other rows) text width of the drawn prompt, to find the caret's row
         self.prompt_hit: Optional[tuple[int, int, list[tuple[int, int, int]]]] = None  # (first row, first column, [(row, column, index)]) of the drawn prompt, for clicks
         self.pastes: dict[int, str] = {}  # the full text behind each [Pasted text #N] chip in the prompt
         self.paste_seq = 0
@@ -2235,10 +2236,9 @@ class Board:
             elif key == "right" and after:
                 self.cursor = after[0][1]
             elif key == "home":
-                self.cursor = self._input.rfind("\n", 0, c) + 1
+                self.cursor = self._row_edges()[0]
             elif key == "end":
-                nl = self._input.find("\n", c)
-                self.cursor = len(self._input) if nl < 0 else nl
+                self.cursor = self._row_edges()[1]
         elif key in ("ctrl+left", "alt+left"):
             self.cursor = self._word_start(before)
         elif key in ("ctrl+right", "alt+right"):
@@ -2252,6 +2252,15 @@ class Board:
         else:
             return False
         return True
+
+    def _row_edges(self) -> tuple[int, int]:
+        """Where the row the caret is on starts and ends, as the prompt is drawn (wrapped at the width last rendered)."""
+        first, width = self.prompt_widths or (10**9, 10**9)
+        rows, (row, _), bounds = prompt_wrap(self._input, self.cursor, first, width, "bold")
+        marks = sorted(i for r, _, i in bounds if r == row)
+        if row < len(rows) - 1 and self._input[marks[-1] : marks[-1] + 1] != "\n" and len(marks) > 1:
+            return marks[0], marks[-2]  # a wrapped row ends before its last character, so the caret stays on it
+        return marks[0], marks[-1]
 
     def _is_space(self, tok: tuple[int, int]) -> bool:
         return self._input[tok[0] : tok[1]].isspace()
@@ -2962,9 +2971,8 @@ def prompt_area(board: Board, width: int, inner: int, max_rows: int) -> tuple[li
     right = next((o for o in options if seg_width(o) <= room), options[-1])
     hit, top = None, 0
     if board.input:
-        rows, (caret_row, caret_col), bounds = prompt_wrap(
-            board.input, board.cursor, inner - seg_width(pre) - seg_width(right) - 2, inner - seg_width(pre) - 1, "bold" if board.sel is None else "dim"
-        )
+        board.prompt_widths = (inner - seg_width(pre) - seg_width(right) - 2, inner - seg_width(pre) - 1)
+        rows, (caret_row, caret_col), bounds = prompt_wrap(board.input, board.cursor, *board.prompt_widths, "bold" if board.sel is None else "dim")
         top = max(0, min(caret_row - max_rows + 1, len(rows) - max_rows))  # a prompt taller than the room scrolls with its caret
         shown = rows[top : top + max_rows]
         hit = (seg_width(pre), [(r - top, c, i) for r, c, i in bounds if top <= r < top + len(shown)])

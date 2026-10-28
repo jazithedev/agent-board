@@ -58,6 +58,26 @@ class Caret(unittest.TestCase):
         b.handle("home")
         self.assertEqual(b.cursor, len("one\n"))
 
+    def test_home_and_end_stay_on_the_wrapped_row(self):
+        b = board()
+        text = "alpha beta gamma delta epsilon zeta eta theta"
+        type_(b, text)
+        ab.compose(b, 40, 30)  # draws the prompt, which fixes where it wraps
+        rows = ab.prompt_wrap(text, 0, *b.prompt_widths, "bold")[0]
+        self.assertGreater(len(rows), 1)
+        b.handle("home")
+        start = b.cursor
+        self.assertGreater(start, 0)
+        self.assertEqual(text[start - 1], " ")
+        b.handle("end")
+        self.assertEqual(b.cursor, len(text))
+        b.cursor = 2
+        b.handle("home")
+        self.assertEqual(b.cursor, 0)
+        b.handle("end")
+        self.assertTrue(0 < b.cursor < start)
+        self.assertEqual(text[b.cursor], " ")
+
     def test_backspace_and_delete_act_at_the_caret(self):
         b = board()
         type_(b, "abcd")
