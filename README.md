@@ -127,7 +127,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - **Start a session** by typing in the prompt at the bottom: choose its **project** (`ctrl+p`) and its **model** (`ctrl+e`). The project list holds every directory you have used Claude Code in, not only those with sessions; `ctrl+t` in it pins a project (any `/path` you type can be pinned too). Typing `@` in the prompt lists the same projects like `/` lists commands: `tab` completes `@name` and the session starts in that project. A mention that opens the prompt only picks the project and is not sent; inside a sentence ("add this skill to my @web-app") the name stays in the text.
 - **Slash commands**: type `/` for the list of commands and skills, as in `claude agents`. It filters as you type, `↑` `↓` choose, and `tab` or `enter` completes. Your own skills and commands, those of your installed plugins and the project's are read from disk; Claude Code's built-in commands are a snapshot (2.1.296), and anything else you can still type by hand.
 - **Open a session** with Enter, → or a double-click. Coming back to the board is instant: no flash of your normal terminal.
-- **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, a long prompt grows upward into as many rows as it needs (up to half the screen, then it scrolls with the caret), and a half-written prompt survives while you open other sessions. The caret moves with `←` `→`, a click, `ctrl+←` / `ctrl+→` (by word) and `home` / `end`; `delete`, `ctrl+w` and `alt+backspace` edit around it.
+- **Prompt like Claude Code**: long pastes collapse into `[Pasted text #1 +97 lines]` chips (the full text is what gets sent), `ctrl+j` adds a new line, a long prompt grows upward into as many rows as it needs (up to half the screen, then it scrolls with the caret), and a half-written prompt survives while you open other sessions. The caret moves with `←` `→`, a click, `ctrl+←` / `ctrl+→` (by word) and `home` / `end` (start / end of the caret line); `delete`, `ctrl+w` and `alt+backspace` edit around it.
 - **Mouse**: a click selects a session, a double-click opens it; dragging highlights text live and copies it.
 
 **Pull requests** (optional). Two more tabs in the title row, **Review queue** and **My PRs**, for the projects that have sessions on the board, or the projects you tick under *PR projects* in settings (`ctrl+s`): any folder you have used Claude Code in, with or without sessions. `alt+←` / `alt+→` move between tabs, and a click on a tab opens it:
@@ -211,7 +211,7 @@ sudo apt install wl-clipboard   # Wayland
 | `alt+←` `alt+→` · click a tab | switch between the Sessions, Review queue and My PRs tabs |
 | `ctrl+b` | group the sessions by status or by project |
 | `↑` `↓` · click · double-click | select a session · select it · open it |
-| `home` `end` | jump to the first / last session (in the prompt they move the caret) |
+| `home` `end` | jump to the first / last session (in the prompt they move the caret to the start / end of its line) |
 | `enter` `→` | open the selected session |
 | type, then `enter` | start a new background session; it is selected, so `→` opens it |
 | `/` | list slash commands and skills: `↑` `↓` choose, `tab` or `enter` completes |

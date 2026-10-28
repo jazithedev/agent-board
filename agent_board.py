@@ -2235,9 +2235,10 @@ class Board:
             elif key == "right" and after:
                 self.cursor = after[0][1]
             elif key == "home":
-                self.cursor = 0
+                self.cursor = self._input.rfind("\n", 0, c) + 1
             elif key == "end":
-                self.cursor = len(self._input)
+                nl = self._input.find("\n", c)
+                self.cursor = len(self._input) if nl < 0 else nl
         elif key in ("ctrl+left", "alt+left"):
             self.cursor = self._word_start(before)
         elif key in ("ctrl+right", "alt+right"):

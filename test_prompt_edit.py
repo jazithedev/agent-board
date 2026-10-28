@@ -40,6 +40,24 @@ class Caret(unittest.TestCase):
         type_(b, "y")
         self.assertEqual(b.input, "xabcy")
 
+    def test_home_and_end_stay_on_the_caret_line(self):
+        b = board()
+        type_(b, "one")
+        b.handle("ctrl+j")
+        type_(b, "two")
+        b.handle("ctrl+j")
+        type_(b, "three")
+        b.cursor = len("one\ntw")
+        b.handle("home")
+        self.assertEqual(b.cursor, len("one\n"))
+        b.handle("end")
+        self.assertEqual(b.cursor, len("one\ntwo"))
+        b.handle("end")
+        self.assertEqual(b.cursor, len("one\ntwo"))
+        b.handle("home")
+        b.handle("home")
+        self.assertEqual(b.cursor, len("one\n"))
+
     def test_backspace_and_delete_act_at_the_caret(self):
         b = board()
         type_(b, "abcd")
