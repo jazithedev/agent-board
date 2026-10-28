@@ -53,10 +53,43 @@ class Caret(unittest.TestCase):
         b.handle("end")
         self.assertEqual(b.cursor, len("one\ntwo"))
         b.handle("end")
-        self.assertEqual(b.cursor, len("one\ntwo"))
+        self.assertEqual(b.cursor, len("one\ntwo\nthree"))  # again: on to the end of the next line
+        b.handle("end")
+        self.assertEqual(b.cursor, len("one\ntwo\nthree"))
         b.handle("home")
+        self.assertEqual(b.cursor, len("one\ntwo\n"))
         b.handle("home")
-        self.assertEqual(b.cursor, len("one\n"))
+        self.assertEqual(b.cursor, len("one\n"))  # again: back to the start of the line above
+        b.handle("home")
+        self.assertEqual(b.cursor, 0)
+        b.handle("home")
+        self.assertEqual(b.cursor, 0)
+
+    def test_up_and_down_move_between_prompt_rows(self):
+        b = board()
+        type_(b, "one")
+        b.handle("ctrl+j")
+        type_(b, "twotwo")
+        b.handle("ctrl+j")
+        type_(b, "x")
+        b.handle("up")
+        self.assertEqual(b.cursor, len("one\nt"))  # one column in, as the caret was after the x
+        b.cursor = len("one\ntw")
+        b.handle("up")
+        self.assertEqual(b.cursor, 2)
+        b.handle("down")
+        self.assertEqual(b.cursor, len("one\ntw"))
+        self.assertIsNone(b.sel)
+
+    def test_up_on_the_first_row_leaves_the_caret_and_the_wheel_never_moves_it(self):
+        b = board()
+        type_(b, "one")
+        b.handle("up")
+        self.assertEqual(b.cursor, 3)
+        b.handle("ctrl+j")
+        b.wheel = True
+        b.handle("up")
+        self.assertEqual(b.cursor, 4)
 
     def test_home_and_end_stay_on_the_wrapped_row(self):
         b = board()

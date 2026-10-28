@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.27.4"
+__version__ = "0.28.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1218,6 +1218,7 @@ class Board:
         self.launch_cwd = launch_cwd
         self.mode = self.grouping  # status | project (the Sessions tab, grouped that way) | review | mine
         self.input = ""
+        self.wheel = False  # the key being handled is the mouse wheel, which scrolls the sessions rather than the prompt
         self.prompt_widths: Optional[tuple[int, int]] = None  # (first row, other rows) text width of the drawn prompt, to find the caret's row
         self.prompt_hit: Optional[tuple[int, int, list[tuple[int, int, int]]]] = None  # (first row, first column, [(row, column, index)]) of the drawn prompt, for clicks
         self.pastes: dict[int, str] = {}  # the full text behind each [Pasted text #N] chip in the prompt
@@ -2235,10 +2236,10 @@ class Board:
                 self.cursor = before[-1][0]
             elif key == "right" and after:
                 self.cursor = after[0][1]
-            elif key == "home":
-                self.cursor = self._row_edges()[0]
-            elif key == "end":
-                self.cursor = self._row_edges()[1]
+            elif key in ("home", "end"):
+                self._step_row(key)
+        elif key in ("up", "down"):
+            return not self.wheel and self._step_row(key)
         elif key in ("ctrl+left", "alt+left"):
             self.cursor = self._word_start(before)
         elif key in ("ctrl+right", "alt+right"):
@@ -2253,14 +2254,36 @@ class Board:
             return False
         return True
 
-    def _row_edges(self) -> tuple[int, int]:
-        """Where the row the caret is on starts and ends, as the prompt is drawn (wrapped at the width last rendered)."""
+    def _rows(self) -> tuple[list[list[tuple[int, int]]], int, int]:
+        """The prompt as drawn (wrapped at the width last rendered): per row its [(column, text index)] stops, the caret's row and column.
+
+        A wrapped row has no stop at its very end: that spot is the start of the next row."""
         first, width = self.prompt_widths or (10**9, 10**9)
-        rows, (row, _), bounds = prompt_wrap(self._input, self.cursor, first, width, "bold")
-        marks = sorted(i for r, _, i in bounds if r == row)
-        if row < len(rows) - 1 and self._input[marks[-1] : marks[-1] + 1] != "\n" and len(marks) > 1:
-            return marks[0], marks[-2]  # a wrapped row ends before its last character, so the caret stays on it
-        return marks[0], marks[-1]
+        rows, (row, col), bounds = prompt_wrap(self._input, self.cursor, first, width, "bold")
+        stops: list[list[tuple[int, int]]] = [[] for _ in rows]
+        for r, cl, i in bounds:
+            stops[r].append((cl, i))
+        for r in range(len(rows) - 1):
+            if len(stops[r]) > 1 and self._input[stops[r][-1][1] : stops[r][-1][1] + 1] != "\n":
+                stops[r].pop()
+        return stops, row, col
+
+    def _step_row(self, key: str) -> bool:
+        """home / end / up / down by rows of the prompt; False when the caret has no row to go to, so the key falls through."""
+        stops, row, col = self._rows()
+        start, end = stops[row][0][1], stops[row][-1][1]
+        if key == "home":
+            target = row - 1 if self.cursor == start and row > 0 else row
+            self.cursor = stops[target][0][1]
+        elif key == "end":
+            target = row + 1 if self.cursor == end and row < len(stops) - 1 else row
+            self.cursor = stops[target][-1][1]
+        else:
+            target = row + (-1 if key == "up" else 1)
+            if not 0 <= target < len(stops):
+                return False
+            self.cursor = min(stops[target], key=lambda st: abs(st[0] - col))[1]
+        return True
 
     def _is_space(self, tok: tuple[int, int]) -> bool:
         return self._input[tok[0] : tok[1]].isspace()
@@ -3493,10 +3516,14 @@ def mouse_event(sel: Selection, board: Board, y: int, x: int, bstate: int, lines
     modal = bool(board.settingsui or board.picker or board.modelpicker or board.tagpicker or board.help or board.peek or board.edit or board.confirm)
     if bstate & _bit("BUTTON4_PRESSED", 0x10000):
         if not modal:
+            board.wheel = True
             board.handle("up")
+            board.wheel = False
     elif bstate & _bit("BUTTON5_PRESSED", 0x200000):
         if not modal:
+            board.wheel = True
             board.handle("down")
+            board.wheel = False
     elif bstate & _bit("BUTTON1_PRESSED"):
         sel.start = sel.end = (y, x)
         sel.active = True
