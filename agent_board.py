@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.27.1"
+__version__ = "0.27.2"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -3872,6 +3872,7 @@ class Painter:
 
     def draw(self, scr, lines: list[Line]) -> None:
         h, w = scr.getmaxyx()
+        scr.erase()  # rows below the last line would otherwise keep what an earlier, taller frame drew
         for y, line in enumerate(lines[:h]):
             scr.move(y, 0)
             scr.clrtoeol()
@@ -3988,6 +3989,8 @@ def read_key(scr) -> tuple[str, str]:
             return "tick", ""
         return "char", ch
     if ch == curses.KEY_RESIZE:
+        curses.update_lines_cols()
+        scr.clearok(True)  # the terminal reflowed its own copy of the screen; repaint all of it
         return "tick", ""
     if ch == curses.KEY_MOUSE:
         try:
