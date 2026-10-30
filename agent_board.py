@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -413,6 +413,8 @@ PR_VIEWS = ("review", "mine")
 VIEW_LABEL = {"status": "by status", "project": "by project", "review": "review queue", "mine": "my pull requests"}
 TABS = (("sessions", "Sessions"), ("review", "Review queue"), ("mine", "My PRs"))  # the title row's tabs; Sessions is grouped by status or project
 GROUPINGS = ("status", "project")
+REVIEW_GROUPINGS = ("project", "ticket")  # ticket: the key before the colon in the PR title
+NO_TICKET = "No ticket"
 MINE_GROUPS = [("attention", "Needs attention"), ("ready", "Ready to merge"), ("waiting", "Waiting"), ("draft", "Draft")]
 DEFAULT_LIBRARY = ["Bug", "Feature", "Docs", "Plan", "Tests", "Code Review", "Pull Request", "Ready for QA", "Urgent", "Blocked"]
 PR_TAG_ID = "pr:"  # a pull request's tags sit in meta under "pr:<its key>", beside the sessions', so tag renames and deletes reach them too
@@ -1150,7 +1152,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
     ],
     "review": [
         ("↑ / ↓", "move between pull requests"),
-        ("alt+↑ / alt+↓", "jump between projects"),
+        ("alt+↑ / alt+↓", "jump between groups (projects or tickets)"),
         ("space", "mark / unmark the pull request, then move on"),
         ("ctrl+a", "mark or unmark every pull request in the view"),
         ("r", "review the marked PRs (or the current one): one session per project"),
@@ -1158,6 +1160,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("enter / click", "jump to a session already on that PR (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
         ("ctrl+f", "filter pull requests"),
+        ("ctrl+b", "group by project or by the ticket before the colon in the title, e.g. BI-1234: … (remembered)"),
         *HELP_COMMON_END,
         ("esc", "clear the marks or the filter, then back to the session list"),
         ("mouse", "click opens a pull request; drag selects text and copies it"),
@@ -1816,6 +1819,16 @@ class Board:
         """(title, subtitle, [(pr, nesting depth)]) for the current pull-request view."""
         if not self.prs:
             return []
+        if self.mode == "review" and self.review_grouping == "ticket":
+            by_ticket: dict[str, list] = {}
+            for p in self.review_prs():
+                if self._matches_pr(p):
+                    by_ticket.setdefault(prs.title_ticket(p.title), []).append(p)
+            groups = []
+            for ticket, items in by_ticket.items():
+                projects = " · ".join(sorted({self.pr_project(p)[0] for p in items}))
+                groups.append((ticket or NO_TICKET, projects, [(p, 0) for p in sorted(items, key=lambda p: p.created_at)]))
+            return sorted(groups, key=lambda g: (g[0] == NO_TICKET, -len(g[2]), g[0]))  # PRs without a ticket come last
         if self.mode == "review":
             by_project: dict[str, list] = {}
             for path in self.prs.repos.values():
@@ -1927,6 +1940,12 @@ class Board:
         return value if value in GROUPINGS else "status"
 
     @property
+    def review_grouping(self) -> str:
+        """How the Review queue groups its PRs: "project" or "ticket", remembered between runs."""
+        value = self.meta.settings.get("review_grouping")
+        return value if value in REVIEW_GROUPINGS else "project"
+
+    @property
     def tab(self) -> str:
         return self.mode if self.mode in PR_VIEWS else "sessions"
 
@@ -1940,6 +1959,10 @@ class Board:
         self.set_tab(names[max(0, min(len(names) - 1, names.index(self.tab) + delta))])
 
     def toggle_grouping(self) -> None:
+        if self.mode == "review":
+            self.meta.set_setting("review_grouping", "ticket" if self.review_grouping == "project" else None)
+            self.scroll = 0
+            return
         if self.mode in PR_VIEWS:
             return
         self.meta.set_setting("grouping", "project" if self.grouping == "status" else None)
@@ -2631,6 +2654,9 @@ def pr_row(board: Board, pr, depth: int, width: int, selected: bool) -> Line:
         flags = [f for f in pr.flags if f != "new"] + (["draft"] if pr.draft else [])
         age = fmt_age(now - pr.created_at) if pr.created_at else ""
         right: list[Seg] = [(f"@{pr.author}" if pr.author else "", "dim"), (f"  {age:>4}", "dim")]
+        if board.review_grouping == "ticket":  # the group heading no longer names the project, so the row does
+            project = board.pr_project(pr)[0]
+            right = [("● ", project_style(project)), (project, "dim"), ("  ", "normal")] + right
     else:
         icon, style = {"attention": ("✗", "fail"), "ready": ("✓", "done"), "waiting": ("○", "dim"), "draft": ("◌", "faint")}[pr.group]
         nest = "└ " * min(depth, 1) if depth else ""
@@ -2678,10 +2704,17 @@ def pr_body(board: Board, width: int) -> tuple[list[Line], list[Optional[str]], 
             body.append(Line([]))
             owners.append(None)
         head: list[Seg] = [("  ", "normal")]
-        if board.mode == "review":
+        if board.mode == "review" and board.review_grouping == "project":
             head += [("● ", project_style(title)), (title, "head"), (f"  {len(items)}", "faint"), (f"   {subtitle}", "faint")]
+        elif board.mode == "review":
+            head += [(title, "head"), (f"  {len(items)}", "faint"), (f"   {subtitle}", "faint")]
         else:
             head += [(title, "head"), (f"  {len(items)}", "faint")]
+        if gi == 0 and board.mode == "review":  # as on the Sessions tab: the grouping is named once, ctrl+b switches it
+            note = f"grouped by {board.review_grouping} · ctrl+b"
+            room = width - seg_width(head) - cell_width(note)
+            if room >= 2:
+                head += [(" " * room, "normal"), (note, "faint")]
         body.append(Line(head))
         owners.append(None)
         if not items:
@@ -3306,7 +3339,7 @@ def _hint_segs(board: Board) -> list[Seg]:
             else "↑/↓ move · enter toggle · type to filter or create · ctrl+r rename · ctrl+x delete · esc done"
         )
     elif board.mode == "review":
-        hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+l refresh · ctrl+s settings · esc back"
+        hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+b group · ctrl+l refresh · ctrl+s settings · esc back"
     elif board.mode == "mine":
         hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+s settings · alt+←/→ tabs · esc back"
     elif board.sel:

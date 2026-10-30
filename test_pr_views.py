@@ -1,3 +1,4 @@
+import dataclasses
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -97,10 +98,11 @@ class Tabs(unittest.TestCase):
         keys(b, "ctrl+b")
         self.assertEqual(b.mode, "status")
 
-    def test_ctrl_b_does_nothing_on_a_pull_request_tab(self):
-        b = board("review", review=[review(5)])
+    def test_ctrl_b_does_nothing_on_my_prs(self):
+        b = board("mine", mine=[mine(5)])
         keys(b, "ctrl+b")
-        self.assertEqual(b.mode, "review")
+        self.assertEqual(b.mode, "mine")
+        self.assertEqual(b.review_grouping, "project")
 
     def test_the_grouping_is_named_beside_the_first_group(self):
         b = board("status")
@@ -191,6 +193,44 @@ class ReviewQueue(unittest.TestCase):
     def test_a_review_session_gets_the_code_review_and_pr_tags_from_its_own_prompt(self):
         [(_, _, prompt, _)] = ab.review_prompts(self.b, [review(5)])
         self.assertEqual([t.label for t in ab.derive_tags(prompt)], ["Code Review", "PR #5"])
+
+
+class ReviewQueueByTicket(unittest.TestCase):
+    """ctrl+b in the Review queue groups the PRs by the ticket key before the colon in their titles."""
+
+    def queue(self):
+        return [dataclasses.replace(review(5), title="BI-1234: Fix totals"), dataclasses.replace(review(6, "acme/web-app"), title="bi-1234 : Same ticket"),
+                dataclasses.replace(review(7), title="AM-9: Other"), review(8)]
+
+    def text(self, b):
+        return "\n".join(ab.plain(l) for l in ab.compose(b, 120, 30)[0])
+
+    def test_ctrl_b_groups_by_ticket_with_no_ticket_last_and_it_is_remembered(self):
+        b = board(review=self.queue())
+        keys(b, "ctrl+b")
+        groups = b.pr_groups()
+        self.assertEqual([(t, sub, [p.number for p, _ in items]) for t, sub, items in groups],
+                         [("BI-1234", "billing-api · web-app", [6, 5]), ("AM-9", "billing-api", [7]), ("No ticket", "billing-api", [8])])
+        again = ab.Board(b.meta, "/srv/www/scum-map", now=lambda: NOW)
+        self.assertEqual(again.review_grouping, "ticket")
+        keys(b, "ctrl+b")
+        self.assertEqual(b.review_grouping, "project")
+        self.assertEqual(b.mode, "review")
+        self.assertEqual(b.grouping, "status")  # the Sessions tab keeps its own grouping
+
+    def test_grouped_by_ticket_the_heading_names_it_and_each_row_its_project(self):
+        b = board(review=self.queue())
+        self.assertIn("grouped by project · ctrl+b", self.text(b))
+        keys(b, "ctrl+b")
+        text = self.text(b)
+        self.assertIn("grouped by ticket · ctrl+b", text)
+        row = next(l for l in text.splitlines() if "#6" in l)
+        self.assertIn("● web-app", row)
+
+    def test_alt_down_jumps_to_the_next_ticket(self):
+        b = board(review=self.queue())
+        keys(b, "ctrl+b", "down", "alt+down")
+        self.assertEqual(b.selected_pr().number, 7)
 
 
 class Opening(unittest.TestCase):

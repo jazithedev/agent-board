@@ -188,6 +188,7 @@ _CHECKS = {"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail", "PENDING": "pe
 
 
 TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
+TITLE_TICKET_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]{0,9}-\d+)\s*:")  # "BI-1234: Title"
 REVIEWED = {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
 
 
@@ -224,6 +225,12 @@ def ticket_of(head: str, title: str) -> str:
     """The ticket key in the branch name, else in the title."""
     m = TICKET_RE.search(head.upper()) or TICKET_RE.search(title)
     return m.group(1) if m else ""
+
+
+def title_ticket(title: str) -> str:
+    """The ticket key written before the colon at the start of the title, else ""."""
+    m = TITLE_TICKET_RE.match(title)
+    return m.group(1).upper() if m else ""
 
 
 def github_my_pr(node: dict) -> MyPr:

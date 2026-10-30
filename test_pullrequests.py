@@ -80,6 +80,12 @@ class Normalising(unittest.TestCase):
         self.assertEqual(pr.ticket_of("fix-it", "BI-1234 fix it"), "BI-1234")
         self.assertEqual(pr.ticket_of("fix-it", "fix it"), "")
 
+    def test_title_ticket_is_the_key_before_the_colon_at_the_start(self):
+        self.assertEqual(pr.title_ticket("BI-1234: Fix totals"), "BI-1234")
+        self.assertEqual(pr.title_ticket("  bi-77 : lower case"), "BI-77")
+        self.assertEqual(pr.title_ticket("Fix BI-1234: not a prefix"), "")
+        self.assertEqual(pr.title_ticket("BI-1234 no colon"), "")
+
     def test_a_pr_only_a_bot_reviewed_counts_as_not_reviewed(self):
         node = mine_node("o/r", 1, latestReviews={"nodes": [{"state": "COMMENTED", "author": {"__typename": "Bot", "login": "copilot-pull-request-reviewer"}}]})
         self.assertFalse(pr.github_my_pr(node).reviewed)
