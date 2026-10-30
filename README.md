@@ -173,6 +173,7 @@ sudo apt install wl-clipboard   # Wayland
 | `enter` `→` | open the selected session |
 | type, then `enter` | start a new background session; it is selected, so `→` opens it |
 | `/` | list slash commands and skills: `↑` `↓` choose, `tab` or `enter` completes |
+| `ctrl+n` | dictate into the prompt: press to record, press again to stop ([setup](#dictation)) |
 | `ctrl+p` · `ctrl+e` | choose the project · the model for new sessions |
 | `space` | peek at a session's recent output |
 | `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row, the old name selected so typing replaces it) · tags · pin |
@@ -181,6 +182,15 @@ sudo apt install wl-clipboard   # Wayland
 | `ctrl+l` · `ctrl+s` | refresh pull requests · settings |
 | `ctrl+c` | clear the typed prompt (never quits) |
 | `esc` | leave the list, clear the prompt, then quit |
+
+## Dictation
+
+`ctrl+n` records from your microphone, and a second `ctrl+n` stops and turns the speech into text at the caret. Read it, edit it, press `enter`. (`ctrl+v` stays paste.) It works on the Sessions tab and nothing is sent anywhere by the board itself: two commands do the work, and both are settings (`ctrl+s`), so you can swap either:
+
+- **Dictation recorder**: writes a WAV file. Default: `arecord -q -f S16_LE -r 16000 -c 1 {audio}` (`sudo apt install alsa-utils`).
+- **Dictation command**: reads that file and prints the text on stdout. Default: the bundled `dictate.py`, which runs [faster-whisper](https://github.com/SYSTRAN/faster-whisper) locally (`pip install faster-whisper`; the first run downloads the model). Choose the model and language with `AGENT_BOARD_WHISPER_MODEL` (`tiny`, `base` by default, `small`, …) and `AGENT_BOARD_WHISPER_LANGUAGE` (for example `pl`; empty detects it).
+
+`{audio}` stands for the recording's path; a command without it gets the path as its last argument. Any speech-to-text client fits, for example `whisper-cli -m ~/models/ggml-base.en.bin -nt -f {audio}` for whisper.cpp. The recording lives in a temporary folder and is deleted when the text is ready.
 
 ## What it reads and writes
 
@@ -231,6 +241,7 @@ python3 -m pip install ruff && ruff check .
 |---|---|
 | `agent_board.py` | the board: data, state, rendering, input handling |
 | `pullrequests.py` | pull-request and merge-request fetching (GitHub via `gh`, GitLab via `glab`) |
+| `dictate.py` | the default speech-to-text command for dictation (faster-whisper) |
 | `mods/agent-board-limits/` | the companion Claude Code mod |
 | `install.sh` | the installer |
 | `test_*.py` | unit tests; several drive real pseudo-terminals |
