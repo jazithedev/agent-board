@@ -26,6 +26,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -38,7 +39,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.29.1"
+__version__ = "0.30.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1103,9 +1104,14 @@ def project_style(name: str) -> str:
 # ───────────────────────────── board state ─────────────────────────────
 
 
+DICTATE_KEY = "ctrl+n"  # not ctrl+v: that one pastes
+DEFAULT_DICTATE_RECORD = "arecord -q -f S16_LE -r 16000 -c 1 {audio}"  # {audio} is the file the recording is written to
+DEFAULT_DICTATE_COMMAND = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).with_name('dictate.py')))} {{audio}}"  # prints the text on stdout
+
+
 @dataclass
 class Effect:
-    kind: str  # attach | quit | dispatch | stop | remove | peek
+    kind: str  # attach | quit | dispatch | stop | remove | peek | dictate_start | dictate_stop
     session_id: str = ""
     prompt: str = ""
     cwd: str = ""
@@ -1120,7 +1126,7 @@ class Effect:
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
     ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews"),
+    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews, dictation"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1141,6 +1147,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("← / → / click", "move the caret in the prompt; ctrl+← / ctrl+→ by word, home / end to the ends"),
         ("delete / ctrl+w", "delete the character after the caret / the word before it (alt+backspace too)"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
+        ("ctrl+n", "dictate: start recording, press again to stop; the text lands at the caret (the recorder and speech-to-text command are in ctrl+s)"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
         ("ctrl+p", "choose the project a new session starts in: every project you have used Claude Code in is listed; ctrl+t inside pins one"),
         ("ctrl+e", "choose the model new sessions use (alias or any model id)"),
@@ -1256,6 +1263,9 @@ class Board:
         self.sessions_due = threading.Event()  # set to refresh the session list now instead of on the next tick
         self.sync_open = False  # a synchronized repaint was begun after a session and must be ended
         self.queued_effect: Optional[Effect] = None  # an action a mouse click asked for, run by the main loop
+        self.dictation: Optional[str] = None  # "recording" while the microphone is open, "transcribing" while the text is made
+        self.dictate: dict = {}  # the recorder process and its audio file while recording
+        self.dictated = ""  # text a background transcription finished; the next tick puts it in the prompt
         self.last_click: Optional[tuple[str, float]] = None  # (session id, when) of the last click on a session row
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
         self.pr_busy_keys: dict[str, str] = {}  # pull request key -> "approving…" while that runs in the background
@@ -1975,7 +1985,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews")]
+        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews"), ("dictate_record", "Dictation recorder"), ("dictate_cmd", "Dictation command")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -1983,6 +1993,10 @@ class Board:
             return s.get("review_command", DEFAULT_REVIEW_COMMAND)
         if name == "review_cmd_gl":
             return s.get("review_command_gitlab", DEFAULT_REVIEW_COMMAND_GITLAB)
+        if name == "dictate_record":
+            return s.get("dictate_record", DEFAULT_DICTATE_RECORD)
+        if name == "dictate_cmd":
+            return s.get("dictate_command", DEFAULT_DICTATE_COMMAND)
         return ""
 
     def _commit_setting(self, name: str, text: str) -> None:
@@ -1991,6 +2005,10 @@ class Board:
             self.meta.set_setting("review_command", None if text in ("", DEFAULT_REVIEW_COMMAND) else text)
         elif name == "review_cmd_gl":
             self.meta.set_setting("review_command_gitlab", None if text in ("", DEFAULT_REVIEW_COMMAND_GITLAB) else text)
+        elif name == "dictate_record":
+            self.meta.set_setting("dictate_record", None if text in ("", DEFAULT_DICTATE_RECORD) else text)
+        elif name == "dictate_cmd":
+            self.meta.set_setting("dictate_command", None if text in ("", DEFAULT_DICTATE_COMMAND) else text)
 
     def _handle_pr_projects(self, key: str, ch: str) -> None:
         """The PR projects list inside settings: space or enter ticks a project, d goes back to the default, esc returns."""
@@ -2189,6 +2207,7 @@ class Board:
         self.msg = "" if key != "tick" else self.msg
         if key == "tick":
             self.tick += 1
+            self._apply_dictated()
             return None
         if key == "ctrl+c":
             # never leaves the board (esc does): it cancels whatever is open, else clears the prompt
@@ -2345,6 +2364,22 @@ class Board:
         """The prompt as it will be sent: every chip replaced by the text it stands for."""
         return PASTE_CHIP_RE.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), self.input if text is None else text)
 
+    def _toggle_dictation(self) -> Optional[Effect]:
+        if self.dictation == "transcribing":
+            self.msg = "still turning your speech into text…"
+            return None
+        return Effect("dictate_stop" if self.dictation == "recording" else "dictate_start")
+
+    def _apply_dictated(self) -> None:
+        """Puts the finished transcription at the caret, set off from the word before it."""
+        text, self.dictated = self.dictated, ""
+        if not text:
+            return
+        self.sel = None  # the prompt takes the focus, as for any typing
+        before = self._input[: self.cursor]
+        self._insert((" " if before and not before[-1].isspace() else "") + text)
+        self.msg = f"✓ dictated {len(text.split())} words: check them, then enter"
+
     def reset_prompt(self) -> None:
         self.input = ""
         self.pastes.clear()
@@ -2475,6 +2510,8 @@ class Board:
             return None
         if self.mode in PR_VIEWS:
             return self._handle_pr_view(key, ch)
+        if key == DICTATE_KEY:
+            return self._toggle_dictation()
         consumed, effect = self._slash_key(key)
         if consumed:
             return effect
@@ -3322,6 +3359,9 @@ def _hint_segs(board: Board) -> list[Seg]:
         return [(" ", "normal"), (f"{verb} “{board.name_of(s) if s else '?'}”?", "warn"), (f"  {CONFIRM_KEY} or ctrl+x to confirm · any other key cancels", "faint")]
     if board.msg:
         return [(" ", "normal"), (board.msg, "fail" if board.msg.startswith("✗") else "accent")]
+    if board.dictation:
+        return [(" ", "normal"), ("● recording" if board.dictation == "recording" else "… turning your speech into text", "warn"),
+                (f"  {DICTATE_KEY} stops" if board.dictation == "recording" else "", "faint")]
     if board.edit:
         hint = {
             "find": "type to filter · enter keep · esc clear",
@@ -3982,7 +4022,7 @@ KEYS = {
     curses.KEY_HOME: "home", curses.KEY_END: "end", curses.KEY_DC: "delete", 23: "ctrl+w",
     curses.KEY_BACKSPACE: "backspace", 127: "backspace", 8: "backspace",
     13: "enter", curses.KEY_ENTER: "enter", 10: "ctrl+j", 22: "ctrl+v", 25: "ctrl+y", 5: "ctrl+e", 9: "tab",
-    18: "ctrl+r", 20: "ctrl+t", 24: "ctrl+x", 19: "ctrl+s", 6: "ctrl+f", 16: "ctrl+p", 7: "ctrl+g", 2: "ctrl+b", 21: "ctrl+u", 3: "ctrl+c", 1: "ctrl+a", 12: "ctrl+l", 15: "ctrl+o",
+    14: "ctrl+n", 18: "ctrl+r", 20: "ctrl+t", 24: "ctrl+x", 19: "ctrl+s", 6: "ctrl+f", 16: "ctrl+p", 7: "ctrl+g", 2: "ctrl+b", 21: "ctrl+u", 3: "ctrl+c", 1: "ctrl+a", 12: "ctrl+l", 15: "ctrl+o",
 }
 
 
@@ -4559,6 +4599,91 @@ def register_new_session(board: Board, effect: Effect, first_line: str, started:
     return False
 
 
+def audio_command(template: str, audio: str) -> list[str]:
+    """A dictation command with {audio} replaced by the recording's path; a command without the placeholder gets the path last."""
+    parts = shlex.split(template)
+    if not any("{audio}" in p for p in parts):
+        parts.append("{audio}")
+    return [p.replace("{audio}", audio) for p in parts]
+
+
+def start_dictation(board: Board, popen=subprocess.Popen) -> None:
+    """Opens the microphone through the recorder command (settings: Dictation recorder); the recording runs until stop_dictation."""
+    folder = tempfile.mkdtemp(prefix="agent-board-")
+    audio = str(Path(folder) / "speech.wav")
+    try:
+        proc = popen(audio_command(board.meta.settings.get("dictate_record") or DEFAULT_DICTATE_RECORD, audio),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+    except (OSError, ValueError) as exc:  # ValueError: a command that does not parse
+        shutil.rmtree(folder, ignore_errors=True)
+        board.msg = f"✗ could not start recording: {exc}"
+        return
+    board.dictate = {"proc": proc, "audio": audio, "folder": folder}
+    board.dictation = "recording"
+
+
+def end_recording(board: Board) -> str:
+    """Stops the recorder and returns what it said on stderr, so a failed recording can say why."""
+    proc = board.dictate["proc"]
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGINT)  # arecord and sox finish the file's header on SIGINT
+    try:
+        _, err = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, err = proc.communicate()
+    return (err or b"").decode("utf-8", "replace").strip()
+
+
+def run_transcription(board: Board, audio: str, run=subprocess.run) -> None:
+    """Hands the recording to the Dictation command (blocking: this is the slow part); the text arrives on the next tick."""
+    try:
+        r = run(audio_command(board.meta.settings.get("dictate_command") or DEFAULT_DICTATE_COMMAND, audio),
+                capture_output=True, text=True, timeout=300)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        board.msg = f"✗ could not turn your speech into text: {exc}"
+        return
+    text = " ".join(r.stdout.split())
+    if r.returncode != 0:
+        board.msg = f"✗ speech to text failed: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[-1]}"
+    elif not text:
+        board.msg = "✗ no speech heard"
+    else:
+        board.dictated = text
+
+
+def stop_dictation(board: Board, run=subprocess.run) -> Optional[threading.Thread]:
+    """Closes the microphone and transcribes the recording in the background, so the board keeps drawing."""
+    folder, audio = board.dictate["folder"], board.dictate["audio"]
+    err = end_recording(board)
+    board.dictate = {}
+    if not Path(audio).is_file() or Path(audio).stat().st_size < 1000:  # a bare header: nothing was recorded
+        shutil.rmtree(folder, ignore_errors=True)
+        board.dictation = None
+        board.msg = "✗ nothing recorded" + (f": {err.splitlines()[-1]}" if err else " (check Dictation recorder in ctrl+s)")
+        return None
+    board.dictation = "transcribing"
+
+    def work() -> None:
+        try:
+            run_transcription(board, audio, run)
+        finally:
+            board.dictation = None
+            shutil.rmtree(folder, ignore_errors=True)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    return t
+
+
+def abort_dictation(board: Board) -> None:
+    """The board is closing with the microphone open: stop the recorder and drop the file."""
+    if board.dictation == "recording":
+        end_recording(board)
+        shutil.rmtree(board.dictate["folder"], ignore_errors=True)
+        board.dictate, board.dictation = {}, None
+
+
 def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
     """Runs an effect; returns False when the board should quit."""
     if effect.kind == "quit":
@@ -4574,6 +4699,12 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         how = copy_to_clipboard(effect.text)
         lines = effect.text.count("\n") + 1
         board.msg = f"{'cut' if effect.cut else 'copied'} the prompt ({len(effect.text)} characters{f', {lines} lines' if lines > 1 else ''}) {copy_note(how)}"
+        return True
+    if effect.kind == "dictate_start":
+        start_dictation(board)
+        return True
+    if effect.kind == "dictate_stop":
+        stop_dictation(board)
         return True
     if effect.kind == "review":
         start_review_sessions(board, effect.items)
@@ -4727,6 +4858,7 @@ def main_loop(scr, demo: bool) -> None:
             if effect and not perform(scr, board, effect, loader):
                 break
     finally:
+        abort_dictation(board)
         loader.stop.set()
         board.sessions_due.set()
         set_bracketed_paste(False)

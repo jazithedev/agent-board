@@ -562,7 +562,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews", "dictate_record", "dictate_cmd"])
 
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
