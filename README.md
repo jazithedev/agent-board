@@ -11,49 +11,7 @@ survive while you look at other sessions).
 
 Pure Python standard library: nothing to `pip install`, no accounts, no network calls of its own.
 
-```
- 🦎 Jazi's Agent Board    Sessions   Review queue   My PRs   demo data   1 awaiting · 3 working · 4 completed
- ⇣ 3 to review    ⚑ 2 of yours need you (1 conflict · 1 changes · 1 CI failing)    ✓ 1 ready to merge───
-
-  Awaiting input  1
-  ◆  review checkout refactor  Code Review   Ticket: AM-1234   PR #482            ● billing-api    7m
-     Approve running `composer test` against the staging DB?            ⎇ worktree-checkout-refactor
-
-  Working  3
-▌ ·  listing sync retries  Ticket: WEB-5521                                           ● web-app   12m
-▌    Running the failing job spec in a loop to find the flake
-  ·  report cache layer                                                            ● mobile-app   31m
-     Running the full test suite after the style fix                         ⎇ worktree-report-cache
-  ·  search indexing rewrite                                                       ● mobile-app    1h
-     Batch 4 of 9 reindexed; waiting for the next shard                   ⎇ worktree-search-indexing
-
-  Completed  4
-  ●  MR !328 follow-ups  Code Review   PR #328                                     ● mobile-app    5h
-     Dialog state now lives in the store; the hint closes the popup
-  ✗  failed deploy dry-run                                                        ● infra-tools    1d
-     terraform plan exited 1: backend config missing
-  ●  onboarding flow plan                                                          ● mobile-app    3d
-     Draft written: screens, copy and open questions marked [TODO]
-  ●  docs site migration                                                           ● mobile-app   13d
-     Notes on moving the docs to the new generator
-
-  USAGE  this machine · from local transcripts ──────────────────────────────────────────────────────
-             turns  output  sessions    Models · 30d output
-  Today        412     96k         3    fable-5          ███████░░░  71%
-  7 days      3.1k    812k         9    opus-4-6         ██░░░░░░░░  22%
-  30 days      12k    2.4M        31    sonnet-4-5       █░░░░░░░░░   8%
-  All time     18k    5.1M        52
-  14 days  ▂▅▂▁▁▅▇▄▂▁▃█▆▆
-  cache reads 900M tokens, 30 days
-
-  LIMITS  as of 3m ago ──────────────────────────────────────────────────────────────────────────────
-  5-hour   ████████░░░░░░░░░░░░  38%  resets in 2h 13m  (Sat 23:11)
-  Weekly   ██████████████░░░░░░  71%  resets in 3d 4h  (Wed 01:57)
-  Disk     █████████████░░░░░░░  67%  30G free of 95G  ·  Claude data 1.3G  ·  worktrees 3.0G
-────────────────────────────────────────────────────────────────────────────────────────────────────────
- ❯ describe a task for a new session                 in agent-board  ·  default model  ctrl+p ctrl+e
- enter open · space peek · ctrl+r rename · ctrl+g tags · ctrl+t pin · ctrl+x stop · ? shortcuts
-```
+![Agent Board showing sessions, usage and limits, with demo data](docs/board.png)
 
 > Made-up demo data (`agent-board --demo`). Your real sessions, projects and pull requests show up the same way.
 
