@@ -10,6 +10,7 @@ Run `agent-board --help` for the options, `agent-board --doctor` to check your s
 from __future__ import annotations
 
 import argparse
+import array
 import base64
 import curses
 import fcntl
@@ -39,7 +40,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.30.0"
+__version__ = "0.30.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1105,6 +1106,7 @@ def project_style(name: str) -> str:
 
 
 DICTATE_KEY = "ctrl+n"  # not ctrl+v: that one pastes
+WAVE_WIDTH = 24  # bars of the microphone level shown while recording
 DEFAULT_DICTATE_RECORD = "arecord -q -f S16_LE -r 16000 -c 1 {audio}"  # {audio} is the file the recording is written to
 DEFAULT_DICTATE_COMMAND = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).with_name('dictate.py')))} {{audio}}"  # prints the text on stdout
 
@@ -1266,6 +1268,7 @@ class Board:
         self.dictation: Optional[str] = None  # "recording" while the microphone is open, "transcribing" while the text is made
         self.dictate: dict = {}  # the recorder process and its audio file while recording
         self.dictated = ""  # text a background transcription finished; the next tick puts it in the prompt
+        self.levels: list[float] = []  # how loud the last moments of the recording were (0 to 1), newest last, drawn as a waveform
         self.last_click: Optional[tuple[str, float]] = None  # (session id, when) of the last click on a session row
         self.busy: dict[str, str] = {}  # session id -> "removing…" / "stopping…" while that runs in the background
         self.pr_busy_keys: dict[str, str] = {}  # pull request key -> "approving…" while that runs in the background
@@ -2370,6 +2373,9 @@ class Board:
             return None
         return Effect("dictate_stop" if self.dictation == "recording" else "dictate_start")
 
+    def add_level(self, level: float) -> None:
+        self.levels = (self.levels + [level])[-WAVE_WIDTH:]
+
     def _apply_dictated(self) -> None:
         """Puts the finished transcription at the caret, set off from the word before it."""
         text, self.dictated = self.dictated, ""
@@ -3360,8 +3366,10 @@ def _hint_segs(board: Board) -> list[Seg]:
     if board.msg:
         return [(" ", "normal"), (board.msg, "fail" if board.msg.startswith("✗") else "accent")]
     if board.dictation:
-        return [(" ", "normal"), ("● recording" if board.dictation == "recording" else "… turning your speech into text", "warn"),
-                (f"  {DICTATE_KEY} stops" if board.dictation == "recording" else "", "faint")]
+        if board.dictation == "recording":
+            wave = "".join(SPARK[round(v * (len(SPARK) - 1))] for v in board.levels).rjust(WAVE_WIDTH, SPARK[0])
+            return [(" ", "normal"), ("● recording ", "warn"), (wave, "accent"), (f"  {DICTATE_KEY} stops", "faint")]
+        return [(" ", "normal"), ("… turning your speech into text", "warn")]
     if board.edit:
         hint = {
             "find": "type to filter · enter keep · esc clear",
@@ -4599,6 +4607,28 @@ def register_new_session(board: Board, effect: Effect, first_line: str, started:
     return False
 
 
+WAV_HEADER = 44  # bytes before the samples in the WAV file the recorder is writing
+
+
+def audio_level(path: str, window: int = 3200) -> float:
+    """How loud the last ~100 ms of the growing 16 kHz, 16-bit WAV is, 0 to 1 (0 when it cannot be read, or is another format)."""
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            start = max(WAV_HEADER, (size - window) // 2 * 2)  # samples are 2 bytes: stay on a boundary
+            f.seek(start)
+            raw = f.read(size - start)
+    except OSError:
+        return 0.0
+    samples = array.array("h", raw[: len(raw) // 2 * 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    if not samples:
+        return 0.0
+    rms = (sum(x * x for x in samples) / len(samples)) ** 0.5
+    return min(1.0, rms / 4000) ** 0.7  # speech sits well below full scale; the curve lifts quiet speech so it still moves the bars
+
+
 def audio_command(template: str, audio: str) -> list[str]:
     """A dictation command with {audio} replaced by the recording's path; a command without the placeholder gets the path last."""
     parts = shlex.split(template)
@@ -4619,6 +4649,7 @@ def start_dictation(board: Board, popen=subprocess.Popen) -> None:
         board.msg = f"✗ could not start recording: {exc}"
         return
     board.dictate = {"proc": proc, "audio": audio, "folder": folder}
+    board.levels = []
     board.dictation = "recording"
 
 
@@ -4834,6 +4865,9 @@ def main_loop(scr, demo: bool) -> None:
                     board.sync_open = False
                     sys.stdout.write(SYNC_END)
                     sys.stdout.flush()
+            scr.timeout(100 if board.dictation == "recording" else 250)  # tick faster while recording, so the waveform moves
+            if board.dictation == "recording":
+                board.add_level(audio_level(board.dictate["audio"]))
             key, ch = read_key(scr)
             if key == "ctrl+v":
                 clip = read_clipboard()

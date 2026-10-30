@@ -185,7 +185,7 @@ sudo apt install wl-clipboard   # Wayland
 
 ## Dictation
 
-`ctrl+n` records from your microphone, and a second `ctrl+n` stops and turns the speech into text at the caret. Read it, edit it, press `enter`. (`ctrl+v` stays paste.) It works on the Sessions tab and nothing is sent anywhere by the board itself: two commands do the work, and both are settings (`ctrl+s`), so you can swap either:
+`ctrl+n` records from your microphone, and a second `ctrl+n` stops and turns the speech into text at the caret. Read it, edit it, press `enter`. (`ctrl+v` stays paste.) While it records, the footer draws a live level meter (`● recording ▁▂▅▇▅▃▁`) read from the recording itself, so a flat line tells you the wrong or a muted microphone is in use. It needs a recorder that writes 16 kHz, 16-bit WAV, as the default does. It works on the Sessions tab and nothing is sent anywhere by the board itself: two commands do the work, and both are settings (`ctrl+s`), so you can swap either:
 
 - **Dictation recorder**: writes a WAV file. Default: `arecord -q -f S16_LE -r 16000 -c 1 {audio}` (`sudo apt install alsa-utils`).
 - **Dictation command**: reads that file and prints the text on stdout. Default: the bundled `dictate.py`, which runs [faster-whisper](https://github.com/SYSTRAN/faster-whisper) locally (`pip install faster-whisper`; the first run downloads the model). Choose the model and language with `AGENT_BOARD_WHISPER_MODEL` (`tiny`, `base` by default, `small`, …) and `AGENT_BOARD_WHISPER_LANGUAGE` (for example `pl`; empty detects it).

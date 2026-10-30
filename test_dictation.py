@@ -1,3 +1,4 @@
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,6 +63,55 @@ class DictationKey(unittest.TestCase):
         footer = "".join(t for t, _ in ab._hint_segs(b))
         self.assertIn("recording", footer)
         self.assertIn("ctrl+n stops", footer)
+
+
+def wav(path, samples):
+    Path(path).write_bytes(b"\0" * ab.WAV_HEADER + struct.pack(f"<{len(samples)}h", *samples))
+
+
+class Waveform(unittest.TestCase):
+    def setUp(self):
+        self.path = str(Path(tempfile.mkdtemp()) / "speech.wav")
+
+    def test_silence_is_zero_and_loud_speech_is_high(self):
+        wav(self.path, [0] * 4000)
+        self.assertEqual(ab.audio_level(self.path), 0.0)
+        wav(self.path, [8000, -8000] * 2000)
+        self.assertEqual(ab.audio_level(self.path), 1.0)
+
+    def test_only_the_last_moments_count(self):
+        wav(self.path, [20000, -20000] * 4000 + [0] * 1600)  # loud, then 100 ms of quiet
+        self.assertEqual(ab.audio_level(self.path), 0.0)
+
+    def test_quiet_speech_still_moves_the_bars(self):
+        wav(self.path, [600, -600] * 2000)
+        self.assertGreater(ab.audio_level(self.path), 0.2)
+
+    def test_unreadable_or_header_only_files_are_silent(self):
+        self.assertEqual(ab.audio_level(self.path), 0.0)  # not created yet
+        Path(self.path).write_bytes(b"\0" * ab.WAV_HEADER)
+        self.assertEqual(ab.audio_level(self.path), 0.0)
+
+    def test_the_footer_draws_the_newest_levels_on_the_right(self):
+        b = board()
+        b.dictation = "recording"
+        for level in (0.0, 0.5, 1.0):
+            b.add_level(level)
+        footer = "".join(t for t, _ in ab._hint_segs(b))
+        self.assertIn("▁" * (ab.WAVE_WIDTH - 3) + "▁▅█", footer)
+
+    def test_the_meter_keeps_only_what_fits(self):
+        b = board()
+        for _ in range(ab.WAVE_WIDTH + 10):
+            b.add_level(0.3)
+        self.assertEqual(len(b.levels), ab.WAVE_WIDTH)
+
+    def test_a_new_recording_starts_with_an_empty_meter(self):
+        b = board()
+        b.levels = [1.0] * 5
+        ab.start_dictation(b, popen=lambda args, **kw: FakeRecorder(args, **kw))
+        self.assertEqual(b.levels, [])
+        ab.abort_dictation(b)
 
 
 class DictatedText(unittest.TestCase):
