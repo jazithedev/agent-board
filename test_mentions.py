@@ -104,6 +104,22 @@ class StartingThere(unittest.TestCase):
         self.assertEqual(effect.cwd, "/srv/www/mobile-app")
         self.assertEqual(effect.prompt, "Add this (https://example.com/some-skill) skill to my mobile-app")
 
+    def test_punctuation_right_after_a_mention_is_not_part_of_the_name(self):
+        for typed, sent in [("About @mobile-app.", "About mobile-app."), ("is @mobile-app, or", "is mobile-app, or"),
+                            ("in (@mobile-app)?", "in (mobile-app)?")]:
+            b = board()
+            type_(b, typed)
+            effect = b.handle("enter")
+            self.assertEqual((effect.cwd, effect.prompt), ("/srv/www/mobile-app", sent), typed)
+
+    def test_a_project_name_ending_in_punctuation_still_matches_in_full(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "site.").mkdir()
+        (root / "site").mkdir()
+        b = board([("site.", str(root / "site.")), ("site", str(root / "site"))])
+        type_(b, "fix @site. now")
+        self.assertEqual(b.handle("enter").cwd, str(root / "site."))
+
     def test_it_is_a_one_off_the_chosen_project_stays(self):
         b = board()
         type_(b, "@web-app one")

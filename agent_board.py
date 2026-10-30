@@ -38,7 +38,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.29.0"
+__version__ = "0.29.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -649,7 +649,8 @@ def _transcript_cwd(folder: Path) -> Optional[tuple[float, str]]:
     return None
 
 
-MENTION_RE = re.compile(r"(?<!\S)@(\S+)")
+MENTION_RE = re.compile(r"(?<![^\s(\[{\"'])@(\S+)")  # after a space or an opening bracket/quote, never mid-word (e-mail)
+MENTION_TRAIL = ".,;:!?)]}\"'"  # ends a sentence, not a name: "About @web-app."
 
 
 def mention_name(name: str) -> str:
@@ -1779,11 +1780,15 @@ class Board:
         sentence, so its name stays in the text and only the @ is removed."""
         known = {mention_name(n).lower(): (n, p) for n, p in reversed(self.all_projects())}
         for m in MENTION_RE.finditer(text):
-            hit = known.get(m.group(1).lower())
+            word = m.group(1)
+            if word.lower() not in known:
+                word = word.rstrip(MENTION_TRAIL)  # the full word first: a project may be named "site."
+            hit = known.get(word.lower())
             if hit:
+                stop = m.start(1) + len(word)
                 if text[: m.start()].strip():  # a word in the sentence ("add it to my @web-app"): the name stays, the @ goes
-                    return text[: m.start()] + m.group(1) + text[m.end() :], hit
-                end = m.end() + (1 if text[m.end() : m.end() + 1] in (" ", "\t") else 0)
+                    return text[: m.start()] + word + text[stop:], hit
+                end = stop + (1 if text[stop : stop + 1] in (" ", "\t") else 0)
                 return text[: m.start()] + text[end:], hit  # leading: it only picked the project
         return text, None
 
