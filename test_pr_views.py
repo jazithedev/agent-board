@@ -416,6 +416,7 @@ class MergeFromMyPrs(unittest.TestCase):
             ab.start_merge_session(self.b, pr, "squash")
         [(args, cwd)] = calls
         self.assertEqual(cwd, "/srv/www/billing-api")
+        self.assertEqual(args[args.index("--name") + 1], "Merge: #2")
         prompt = args[-1]
         for part in ("PR #2", "`BI-2-behind`", "origin/main", "never a force push", "worktree",
                      "gh pr checks 2 --repo acme/billing-api --watch", "gh pr merge 2 --repo acme/billing-api --squash --delete-branch"):
@@ -484,7 +485,7 @@ class FixConflicts(unittest.TestCase):
     def test_the_session_runs_in_the_project_with_the_branches_named(self):
         [(args, cwd)] = self.start()
         self.assertEqual(cwd, "/srv/www/billing-api")
-        self.assertEqual(args[0], "--bg")
+        self.assertEqual(args[:3], ["--bg", "--name", "Fix Conflicts: #7"])
         prompt = args[-1]
         for part in ("PR #7", "https://example.com/acme/billing-api/pull/7", "`BI-1-split`", "origin/main", "never a force push", "worktree"):
             self.assertIn(part, prompt)

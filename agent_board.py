@@ -40,7 +40,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1205,8 +1205,8 @@ def bg_command(prompt: str, model: str = "", name: str = "") -> list[str]:
     return ["--bg", *(["--model", model] if model else []), *(["--name", name] if name else []), prompt]
 
 
-def review_title(items: list, label: str = "Code Review") -> str:
-    """A review session's name, e.g. "Code Review: #5, #6": the same every time, not whatever Claude Code would make up."""
+def pr_session_title(items: list, label: str = "Code Review") -> str:
+    """A session name for the PRs it works on, e.g. "Code Review: #5, #6": the same every time, not whatever Claude Code would make up."""
     return f"{label}: " + ", ".join(pr_ref(p) for p in sorted(items, key=lambda p: p.number))
 
 
@@ -4350,7 +4350,7 @@ def review_prompts(board: Board, items: list) -> list[tuple[str, str, str, int, 
         )
         urls = " ".join(p.url for p in sorted(group, key=lambda p: p.number))
         prompt = template.replace("{urls}", urls) if "{urls}" in template else f"{template} {urls}"
-        out.append((board.pr_project(group[0])[0], path, prompt, len(group), review_title(group)))
+        out.append((board.pr_project(group[0])[0], path, prompt, len(group), pr_session_title(group)))
     return out
 
 
@@ -4380,7 +4380,7 @@ def rereview_prompt(board: Board, pr) -> str:
 def start_rereview_session(board: Board, pr) -> None:
     name, path = board.pr_project(pr)
     try:
-        r = run_cli(bg_command(rereview_prompt(board, pr), board.model(), review_title([pr], "Re-review")), cwd=path or None)
+        r = run_cli(bg_command(rereview_prompt(board, pr), board.model(), pr_session_title([pr], "Re-review")), cwd=path or None)
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {exc}"
         return
@@ -4433,7 +4433,7 @@ def start_conflict_session(board: Board, pr) -> None:
     """A background session in the PR's project that merges the base into the branch, resolves the conflicts and pushes."""
     name, path = board.pr_project(pr)
     try:
-        r = run_cli(bg_command(conflict_prompt(pr), board.model()), cwd=path or None)
+        r = run_cli(bg_command(conflict_prompt(pr), board.model(), pr_session_title([pr], "Fix Conflicts")), cwd=path or None)
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"✗ could not start fixing {pr_ref(pr)}: {exc}"
         return
@@ -4457,7 +4457,7 @@ def start_merge_session(board: Board, pr, method: str) -> None:
     """A background session in the PR's project that brings the branch up to date, waits for green checks and merges."""
     name, path = board.pr_project(pr)
     try:
-        r = run_cli(bg_command(merge_prompt(pr, method), board.model()), cwd=path or None)
+        r = run_cli(bg_command(merge_prompt(pr, method), board.model(), pr_session_title([pr], "Merge")), cwd=path or None)
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"✗ could not start merging {pr_ref(pr)}: {exc}"
         return
