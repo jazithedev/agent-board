@@ -40,7 +40,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.30.1"
+__version__ = "0.31.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1200,9 +1200,14 @@ def model_label(value: str) -> str:
     return value.removeprefix("claude-") if value else "default model"
 
 
-def bg_command(prompt: str, model: str = "") -> list[str]:
-    """Arguments for `claude` that start a background session, on the chosen model when there is one."""
-    return ["--bg", *(["--model", model] if model else []), prompt]
+def bg_command(prompt: str, model: str = "", name: str = "") -> list[str]:
+    """Arguments for `claude` that start a background session, on the chosen model and under a set name when given."""
+    return ["--bg", *(["--model", model] if model else []), *(["--name", name] if name else []), prompt]
+
+
+def review_title(items: list, label: str = "Code Review") -> str:
+    """A review session's name, e.g. "Code Review: #5, #6": the same every time, not whatever Claude Code would make up."""
+    return f"{label}: " + ", ".join(pr_ref(p) for p in sorted(items, key=lambda p: p.number))
 
 
 def order_stack(items: list) -> list[tuple[object, int]]:
@@ -4332,8 +4337,8 @@ def open_url(url: str) -> str:
     return f"copied {url} ({copy_to_clipboard(url)})"
 
 
-def review_prompts(board: Board, items: list) -> list[tuple[str, str, str, int]]:
-    """One (project name, folder, prompt, PR count) per project: a session reviews every PR chosen in it."""
+def review_prompts(board: Board, items: list) -> list[tuple[str, str, str, int, str]]:
+    """One (project name, folder, prompt, PR count, session name) per project: a session reviews every PR chosen in it."""
     by_path: dict[str, list] = {}
     for pr in items:
         by_path.setdefault(board.pr_project(pr)[1], []).append(pr)
@@ -4345,15 +4350,15 @@ def review_prompts(board: Board, items: list) -> list[tuple[str, str, str, int]]
         )
         urls = " ".join(p.url for p in sorted(group, key=lambda p: p.number))
         prompt = template.replace("{urls}", urls) if "{urls}" in template else f"{template} {urls}"
-        out.append((board.pr_project(group[0])[0], path, prompt, len(group)))
+        out.append((board.pr_project(group[0])[0], path, prompt, len(group), review_title(group)))
     return out
 
 
 def start_review_sessions(board: Board, items: list) -> None:
     started, failed = [], []
-    for name, path, prompt, count in review_prompts(board, items):
+    for name, path, prompt, count, title in review_prompts(board, items):
         try:
-            r = run_cli(bg_command(prompt, board.model()), cwd=path or None)
+            r = run_cli(bg_command(prompt, board.model(), title), cwd=path or None)
         except (OSError, subprocess.SubprocessError) as exc:
             failed.append(f"{name}: {exc}")
             continue
@@ -4368,14 +4373,14 @@ def start_review_sessions(board: Board, items: list) -> None:
 
 def rereview_prompt(board: Board, pr) -> str:
     """The usual review command for this one PR, told to look at what changed since your approval and to approve if it is safe."""
-    _, _, prompt, _ = review_prompts(board, [pr])[0]
+    prompt = review_prompts(board, [pr])[0][2]
     return prompt + REREVIEW_PROMPT.format(ref=pr_ref(pr), number=pr.number, repo=pr.repo, sha=pr.head_sha[:12])
 
 
 def start_rereview_session(board: Board, pr) -> None:
     name, path = board.pr_project(pr)
     try:
-        r = run_cli(bg_command(rereview_prompt(board, pr), board.model()), cwd=path or None)
+        r = run_cli(bg_command(rereview_prompt(board, pr), board.model(), review_title([pr], "Re-review")), cwd=path or None)
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {exc}"
         return

@@ -175,7 +175,7 @@ class ReviewQueue(unittest.TestCase):
 
     def test_one_prompt_per_project_with_every_url_for_that_project(self):
         marked = [review(5), review(6), review(7, repo="acme/web-app")]
-        got = {name: (path, prompt, n) for name, path, prompt, n in ab.review_prompts(self.b, marked)}
+        got = {name: (path, prompt, n) for name, path, prompt, n, _ in ab.review_prompts(self.b, marked)}
         self.assertEqual(set(got), {"billing-api", "web-app"})
         path, prompt, n = got["billing-api"]
         self.assertEqual((path, n), ("/srv/www/billing-api", 2))
@@ -183,15 +183,22 @@ class ReviewQueue(unittest.TestCase):
 
     def test_gitlab_uses_its_own_prompt_and_both_are_configurable(self):
         gl = review(9, repo="scum-map/scum-map", provider="gitlab")
-        [(_, _, prompt, _)] = ab.review_prompts(self.b, [gl])
+        [(_, _, prompt, _, _)] = ab.review_prompts(self.b, [gl])
         self.assertTrue(prompt.startswith("Review these GitLab merge requests"))
         self.assertTrue(prompt.endswith(gl.url))
         self.b.meta.settings["review_command"] = "/my-review"
-        [(_, _, prompt, _)] = ab.review_prompts(self.b, [review(5)])
+        [(_, _, prompt, _, _)] = ab.review_prompts(self.b, [review(5)])
         self.assertEqual(prompt, "/my-review https://example.com/acme/billing-api/pull/5")  # no {urls}: urls are appended
 
+    def test_each_project_s_session_is_named_after_its_prs_in_order(self):
+        marked = [review(12), review(5), review(7, repo="acme/web-app")]
+        got = {name: title for name, _, _, _, title in ab.review_prompts(self.b, marked)}
+        self.assertEqual(got, {"billing-api": "Code Review: #5, #12", "web-app": "Code Review: #7"})
+        gl = review(9, repo="scum-map/scum-map", provider="gitlab")
+        self.assertEqual(ab.review_prompts(self.b, [gl])[0][4], "Code Review: !9")
+
     def test_a_review_session_gets_the_code_review_and_pr_tags_from_its_own_prompt(self):
-        [(_, _, prompt, _)] = ab.review_prompts(self.b, [review(5)])
+        [(_, _, prompt, _, _)] = ab.review_prompts(self.b, [review(5)])
         self.assertEqual([t.label for t in ab.derive_tags(prompt)], ["Code Review", "PR #5"])
 
 
@@ -737,6 +744,7 @@ class AutoReReview(unittest.TestCase):
         for part in ("since my last approval", "`abc123def456`", "nothing crucial or dangerous", "gh pr review 9 --repo acme/billing-api --approve", "do not approve"):
             self.assertIn(part, prompt)
         self.assertIn("PR #9", prompt)  # so the ⟳ on the row finds this session
+        self.assertEqual(args[args.index("--name") + 1], "Re-review: #9")
         self.assertIn("re-reviews it", b.msg)
 
 

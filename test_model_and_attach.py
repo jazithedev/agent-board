@@ -107,6 +107,7 @@ class UsingTheModel(unittest.TestCase):
     def test_command_line_has_the_model_flag_only_when_one_is_chosen(self):
         self.assertEqual(ab.bg_command("do it", "opus"), ["--bg", "--model", "opus", "do it"])
         self.assertEqual(ab.bg_command("do it", ""), ["--bg", "do it"])
+        self.assertEqual(ab.bg_command("do it", "", "Code Review: #5"), ["--bg", "--name", "Code Review: #5", "do it"])
 
     def test_review_sessions_use_the_model_too(self):
         b = board("opus")
@@ -120,7 +121,7 @@ class UsingTheModel(unittest.TestCase):
 
         with mock.patch.object(ab, "run_cli", fake_cli), mock.patch.object(ab, "load_sessions", lambda: []):
             ab.start_review_sessions(b, [pr])
-        self.assertEqual(calls[0][:3], ["--bg", "--model", "opus"])
+        self.assertEqual(calls[0][:5], ["--bg", "--model", "opus", "--name", "Code Review: #5"])
 
     def test_labels(self):
         self.assertEqual([ab.model_label(v) for v in ("", "opus", "claude-opus-5-5")], ["default model", "opus", "opus-5-5"])
