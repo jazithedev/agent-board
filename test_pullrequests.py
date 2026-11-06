@@ -75,6 +75,13 @@ class Normalising(unittest.TestCase):
                          ("changes", "conflict", "fail", True, "WEB-1", True, ("tom", "Core")))
         self.assertEqual(p.attention, ["conflicts", "changes requested"])  # failing checks behind a conflict are an old result
 
+    def test_my_pr_knows_its_head_commit(self):
+        self.assertEqual(pr.github_my_pr(mine_node("o/r", 7, headRefOid="abc123")).head_sha, "abc123")
+        self.assertIn("headRefOid reviewDecision", pr.GITHUB_QUERY)
+        mr = {"iid": 1, "references": {"full": "g/p!1"}, "sha": "list-sha"}
+        self.assertEqual(pr.gitlab_my_pr(mr, {"sha": "detail-sha"}, {}).head_sha, "detail-sha")
+        self.assertEqual(pr.gitlab_my_pr(mr, {}, {}).head_sha, "list-sha")
+
     def test_ticket_comes_from_the_branch_then_the_title(self):
         self.assertEqual(pr.ticket_of("bi-5008-split", "BI-1 elsewhere"), "BI-5008")
         self.assertEqual(pr.ticket_of("fix-it", "BI-1234 fix it"), "BI-1234")

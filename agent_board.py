@@ -40,7 +40,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.32.0"
+__version__ = "0.33.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1181,6 +1181,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("enter / click", "jump to a session already on that PR (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
         ("f", "fix conflicts: a background session merges the base into the branch, resolves them and pushes"),
+        ("auto", "a PR with conflicts gets that session by itself on refresh, once per head commit; it is closed once its push clears them (Auto fix conflicts in ctrl+s)"),
         ("m", "merge, choosing squash, merge commit or rebase; a PR behind its base is updated first and merged once its checks pass"),
         ("ctrl+g", "tag the pull request: Ready for QA or any tag of yours, picked or typed new"),
         ("ctrl+f", "filter pull requests"),
@@ -1288,6 +1289,7 @@ class Board:
         self.known_at = -1e12
         self.mention_state: dict = {"query": None, "idx": 0}
         self.successors: dict[str, Optional[str]] = {}  # session being deleted -> the row to highlight once it is gone
+        self.fixes_seen_ending: set[tuple[str, float]] = set()  # (conflict fix, its last step) a refresh was already asked for
         self.placeholders: list[Session] = []  # rows for sessions still being started, until the real ones show up
         self.placeholder_seq = 0
 
@@ -1342,12 +1344,25 @@ class Board:
         self._resolve_pending()
         if self.finished_rereviews():  # a re-review just ended: look at GitHub now, not at the next interval
             self.refresh_requested.set()
+        ended = {(s.id, s.updated_at) for s, _ in self.finished_conflict_fixes()} - self.fixes_seen_ending
+        if ended:  # a conflict fix just ended: see at once whether its push cleared the conflicts, once per point
+            self.fixes_seen_ending |= ended
+            self.refresh_requested.set()
 
     def finished_rereviews(self) -> list[tuple[Session, dict]]:
         """Re-review sessions the board started that are done with their turn and were not checked at this point yet."""
         out = []
         for s in self.sessions:
             info = self.meta.get(s.id).get("rereview")
+            if info and s.group in ("idle", "done") and s.id not in self.busy and info.get("checked") != s.updated_at:
+                out.append((s, info))
+        return out
+
+    def finished_conflict_fixes(self) -> list[tuple[Session, dict]]:
+        """Conflict-fixing sessions the board started that are done with their turn and were not checked at this point yet."""
+        out = []
+        for s in self.sessions:
+            info = self.meta.get(s.id).get("conflict_fix")
             if info and s.group in ("idle", "done") and s.id not in self.busy and info.get("checked") != s.updated_at:
                 out.append((s, info))
         return out
@@ -1912,6 +1927,25 @@ class Board:
         done = {k: v for k, v in (self.meta.settings.get("auto_rereviewed") or {}).items() if k in queued}
         self.meta.set_setting("auto_rereviewed", {**done, pr.key: pr.head_sha})
 
+    def auto_fix_conflicts(self) -> bool:
+        return self.meta.settings.get("auto_fix_conflicts", True) is not False
+
+    def conflicts_to_fix(self) -> list:
+        """Your PRs with conflicts, at a head commit no fixing session was started for yet, with no session working on them."""
+        if not self.prs or not self.auto_fix_conflicts():
+            return []
+        done = self.meta.settings.get("conflicts_fixed") or {}
+        return [p for p in self.prs.mine if p.merge == "conflict" and p.head_sha and done.get(p.key) != p.head_sha
+                and not any(s.group == "working" for s in self.linked_sessions(p))]
+
+    def remember_conflict_fix(self, pr) -> None:
+        """One session per PR and head commit, also across restarts; PRs that are no longer yours or open are forgotten."""
+        if not pr.head_sha:
+            return
+        mine = {p.key for p in self.prs.mine} if self.prs else set()
+        done = {k: v for k, v in (self.meta.settings.get("conflicts_fixed") or {}).items() if k in mine}
+        self.meta.set_setting("conflicts_fixed", {**done, pr.key: pr.head_sha})
+
     def without_approved(self, data: "prs.PrData") -> "prs.PrData":
         data.review = [p for p in data.review if p.key not in self.approved]
         return data
@@ -1993,7 +2027,7 @@ class Board:
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews"), ("dictate_record", "Dictation recorder"), ("dictate_cmd", "Dictation command")]
+        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews"), ("autofix", "Auto fix conflicts"), ("dictate_record", "Dictation recorder"), ("dictate_cmd", "Dictation command")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
@@ -2079,11 +2113,13 @@ class Board:
             self.refresh_requested.set()
         elif name == "rereview" and key in ("enter", "space", "left", "right"):
             self.meta.set_setting("auto_rereview", None if not self.auto_rereview() else False)  # on unless turned off
+        elif name == "autofix" and key in ("enter", "space", "left", "right"):
+            self.meta.set_setting("auto_fix_conflicts", None if not self.auto_fix_conflicts() else False)  # on unless turned off
         elif name == "age" and key in ("left", "right", "enter", "space"):
             i = REVIEW_AGE_CHOICES.index(self.review_age_days())
             days = REVIEW_AGE_CHOICES[(i + (-1 if key == "left" else 1)) % len(REVIEW_AGE_CHOICES)]
             self.meta.set_setting("review_max_age_days", None if days == DEFAULT_REVIEW_AGE else days)
-        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "pr_projects", "team_reviews"):
+        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "autofix", "pr_projects", "team_reviews"):
             ui["edit"] = {"field": name, "text": self.setting_text(name)}
         return None
 
@@ -2877,6 +2913,9 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
         elif name == "rereview":
             on_ = board.auto_rereview()
             shown = [("[x] on" if on_ else "[ ] off", "done" if on_ else "faint"), ("  a session re-reviews PRs you approved that changed", "faint")]
+        elif name == "autofix":
+            on_ = board.auto_fix_conflicts()
+            shown = [("[x] on" if on_ else "[ ] off", "done" if on_ else "faint"), ("  a session resolves conflicts in your PRs", "faint")]
         elif name == "age":
             days = board.review_age_days()
             shown = [("◂ ", "faint"), (f"hide PRs older than {days} days" if days else "show every PR", "bold"), (" ▸", "faint")]
@@ -4296,6 +4335,9 @@ class PrLoader(threading.Thread):
                 board.remember_rereview(pr)
                 start_rereview_session(board, pr)
             close_approved_rereviews(board, self.run_)
+            close_fixed_conflicts(board)
+            for pr in board.conflicts_to_fix():  # your PR conflicts with its base: a session merges the base in and pushes
+                start_conflict_session(board, pr, auto=True)
         except Exception as exc:  # keep the board alive and say what went wrong
             board.prs = prs.PrData(errors=[f"refresh failed: {exc}"], fetched_at=time.time())
             outcome = f"✗ refresh failed: {exc}"
@@ -4385,13 +4427,32 @@ def start_rereview_session(board: Board, pr) -> None:
         board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {exc}"
         return
     if r.returncode == 0:
-        found = re.search(r"\b([0-9a-f]{8})\b", (r.stdout.strip().splitlines() or [""])[0])
-        if found:  # remembered, so the board can delete the session once GitHub shows it approved
-            board.meta.update(found.group(1), rereview={"pr": pr.key, "repo": pr.repo, "number": pr.number})
+        sid = started_id(r)
+        if sid:  # remembered, so the board can delete the session once GitHub shows it approved
+            board.meta.update(sid, rereview={"pr": pr.key, "repo": pr.repo, "number": pr.number})
         board.msg = f"✓ {pr_ref(pr)} changed since you approved it: a session in {name} re-reviews it and approves it if nothing is dangerous"
     else:
         board.msg = f"✗ could not start re-reviewing {pr_ref(pr)}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
     board.set_sessions(load_sessions())
+
+
+def started_id(r: subprocess.CompletedProcess) -> str:
+    """The id `claude --bg` printed for the session it started, or "" when it printed none."""
+    found = re.search(r"\b([0-9a-f]{8})\b", (r.stdout.strip().splitlines() or [""])[0])
+    return found.group(1) if found else ""
+
+
+def close_session(board: Board, s: Session) -> subprocess.CompletedProcess:
+    """Stops and deletes a session the board started; the highlight moves on to the row after it."""
+    board.successors[s.id] = board.choose_successor(s.id)
+    board.busy[s.id] = "closing…"
+    try:
+        run_cli(["stop", s.id])  # a session whose process is still alive refuses to be deleted
+        return run_cli(["rm", s.id])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    finally:
+        board.busy.pop(s.id, None)
 
 
 def close_approved_rereviews(board: Board, run=subprocess.run) -> None:
@@ -4405,15 +4466,7 @@ def close_approved_rereviews(board: Board, run=subprocess.run) -> None:
         if not approved:
             board.meta.update(s.id, rereview={**info, "checked": s.updated_at})  # kept; looked at again only if it works on
             continue
-        board.successors[s.id] = board.choose_successor(s.id)
-        board.busy[s.id] = "closing…"
-        try:
-            run_cli(["stop", s.id])  # a session whose process is still alive refuses to be deleted
-            r = run_cli(["rm", s.id])
-        except (OSError, subprocess.SubprocessError) as exc:
-            r = subprocess.CompletedProcess([], 1, "", str(exc))
-        finally:
-            board.busy.pop(s.id, None)
+        r = close_session(board, s)
         ref = f"#{info['number']}"
         if r.returncode == 0:
             board.meta.update(s.id, rereview=None)
@@ -4429,19 +4482,49 @@ def conflict_prompt(pr) -> str:
     return CONFLICT_PROMPT.format(kind="MR" if gitlab else "PR", ref=pr_ref(pr), url=pr.url, head=pr.head or "the PR branch", base=pr.base or "the base branch")
 
 
-def start_conflict_session(board: Board, pr) -> None:
+def start_conflict_session(board: Board, pr, auto: bool = False) -> None:
     """A background session in the PR's project that merges the base into the branch, resolves the conflicts and pushes."""
     name, path = board.pr_project(pr)
+    board.remember_conflict_fix(pr)  # so a refresh does not start a second session for the same commit
     try:
         r = run_cli(bg_command(conflict_prompt(pr), board.model(), pr_session_title([pr], "Fix Conflicts")), cwd=path or None)
     except (OSError, subprocess.SubprocessError) as exc:
         board.msg = f"✗ could not start fixing {pr_ref(pr)}: {exc}"
         return
     if r.returncode == 0:
-        board.msg = f"✓ fixing the conflicts in {pr_ref(pr)} in {name}: a ⟳ marks the PR while the session works"
+        sid = started_id(r)
+        if sid and pr.head_sha:  # remembered, so the board can delete the session once its push clears the conflicts
+            board.meta.update(sid, conflict_fix={"pr": pr.key, "number": pr.number, "sha": pr.head_sha})
+        board.msg = (f"✓ {pr_ref(pr)} has conflicts: a session in {name} resolves them and pushes" if auto
+                     else f"✓ fixing the conflicts in {pr_ref(pr)} in {name}: a ⟳ marks the PR while the session works")
     else:
         board.msg = f"✗ could not start fixing {pr_ref(pr)}: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
     board.set_sessions(load_sessions())
+
+
+def close_fixed_conflicts(board: Board) -> None:
+    """Deletes each finished conflict fix whose PR has a new head commit and no conflicts; one that did not get there stays to be read."""
+    if board.attached or not board.prs:
+        return  # you are inside a session (maybe this one): wait until you are back on the board
+    mine = {p.key: p for p in board.prs.mine}
+    for s, info in board.finished_conflict_fixes():
+        pr = mine.get(info["pr"])
+        if pr is None or board.prs.fetched_at < s.updated_at:
+            continue  # merged, closed or not fetched this time; or the data predates the session's last step
+        pushed = bool(pr.head_sha) and pr.head_sha != info["sha"]
+        if pushed and pr.merge == "unknown" and pr.provider == "github" and not pr.draft:
+            continue  # GitHub is still working out whether the new commit merges cleanly (GitLab says has_conflicts outright)
+        if not pushed or pr.merge == "conflict":
+            board.meta.update(s.id, conflict_fix={**info, "checked": s.updated_at})  # kept; looked at again only if it works on
+            continue
+        r = close_session(board, s)
+        if r.returncode == 0:
+            board.meta.update(s.id, conflict_fix=None)
+            board.msg = f"✓ conflicts in {pr_ref(pr)} resolved and pushed: its session was closed"
+        else:
+            board.meta.update(s.id, conflict_fix={**info, "checked": s.updated_at})
+            board.msg = f"✗ conflicts in {pr_ref(pr)} were resolved, but its session could not be closed: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
+        board.set_sessions(load_sessions())
 
 
 def merge_prompt(pr, method: str) -> str:

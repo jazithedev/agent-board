@@ -570,7 +570,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews", "dictate_record", "dictate_cmd"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews", "autofix", "dictate_record", "dictate_cmd"])
 
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
@@ -806,6 +806,145 @@ class CloseApprovedReReviews(unittest.TestCase):
         with mock.patch.object(ab, "run_cli", cli), mock.patch.object(ab, "load_sessions", lambda: []):
             ab.start_rereview_session(b, b.prs.review[0])
         self.assertEqual(b.meta.get("1a2b3c4d")["rereview"], {"pr": b.prs.review[0].key, "repo": "acme/billing-api", "number": 9})
+
+
+class AutoFixConflicts(unittest.TestCase):
+    """A PR of yours with conflicts gets a session that resolves them, one per head commit."""
+
+    def conflicted(self, n, sha="c0ffee1234567890", **kw):
+        return mine(n, merge="conflict", head_sha=sha, **kw)
+
+    def test_picks_your_conflicted_prs_with_a_head_commit(self):
+        b = board("mine", mine=[self.conflicted(1), mine(2), self.conflicted(3, sha=""), self.conflicted(4, draft=True)])
+        self.assertEqual([p.number for p in b.conflicts_to_fix()], [1, 4])
+
+    def test_skips_a_pr_a_session_is_already_working_on(self):
+        b = board("mine", mine=[self.conflicted(5)])  # s1 works on PR #5
+        self.assertEqual(b.conflicts_to_fix(), [])
+        b.sessions[0].state = "done"
+        self.assertEqual([p.number for p in b.conflicts_to_fix()], [5])
+
+    def test_nothing_is_picked_while_the_setting_is_off(self):
+        b = board("mine", mine=[self.conflicted(1)])
+        b.meta.set_setting("auto_fix_conflicts", False)
+        self.assertEqual(b.conflicts_to_fix(), [])
+
+    def test_the_setting_is_on_until_turned_off_and_that_survives_a_restart(self):
+        b = board("mine")
+        b.handle("ctrl+s")
+        b.settingsui["idx"] = [n for n, _ in b.settings_fields()].index("autofix")
+        self.assertIn("a session resolves conflicts in your PRs", "\n".join(ab.plain(l) for l in ab.compose(b, 120, 30)[0]))
+        b.handle("space")
+        self.assertIs(ab.Meta(b.meta.path).settings["auto_fix_conflicts"], False)
+        b.handle("space")
+        self.assertNotIn("auto_fix_conflicts", b.meta.settings)
+
+    def test_one_session_per_head_commit_remembered_across_restarts(self):
+        b = board("mine")
+        b.set_sessions([session(1)])
+        started = []
+        data = prs.PrData(mine=[self.conflicted(7)], fetched_at=NOW)
+        loader = ab.PrLoader(b, run=RefreshMessage.quiet_world)
+        cli = lambda args, cwd=None, timeout=60: started.append(args[-1]) or SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(ab.prs, "fetch_all", lambda *a, **k: data), mock.patch.object(ab, "run_cli", cli), \
+                mock.patch.object(ab, "load_sessions", lambda: list(b.sessions)):
+            loader.refresh()
+            loader.refresh()
+            self.assertEqual(len(started), 1)
+            self.assertIn("PR #7", started[0])
+            self.assertEqual(ab.Meta(b.meta.path).settings["conflicts_fixed"], {data.mine[0].key: "c0ffee1234567890"})
+            data.mine = [self.conflicted(7, sha="fffeee")]  # conflicts again at a new commit: another session
+            loader.refresh()
+        self.assertEqual(len(started), 2)
+
+    def test_pressing_f_counts_too(self):
+        b = board("mine", mine=[self.conflicted(7)])
+        with mock.patch.object(ab, "run_cli", lambda args, cwd=None, timeout=60: SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                mock.patch.object(ab, "load_sessions", lambda: []):
+            ab.start_conflict_session(b, b.prs.mine[0])
+        self.assertEqual(b.conflicts_to_fix(), [])
+
+    def test_starting_one_remembers_its_session_id(self):
+        b = board("mine", mine=[self.conflicted(7)])
+        cli = lambda args, cwd=None, timeout=60: SimpleNamespace(returncode=0, stdout="backgrounded 1a2b3c4d · claude attach 1a2b3c4d\n", stderr="")
+        with mock.patch.object(ab, "run_cli", cli), mock.patch.object(ab, "load_sessions", lambda: []):
+            ab.start_conflict_session(b, b.prs.mine[0], auto=True)
+        self.assertEqual(b.meta.get("1a2b3c4d")["conflict_fix"], {"pr": b.prs.mine[0].key, "number": 7, "sha": "c0ffee1234567890"})
+        self.assertIn("has conflicts: a session in billing-api resolves them", b.msg)
+
+
+class CloseFixedConflicts(unittest.TestCase):
+    """Once the PR has a new head commit without conflicts, the session that pushed it is deleted; one that did not stays."""
+
+    def setUp(self):
+        self.b = board("mine", mine=[mine(9, merge="clean", head_sha="new")])
+        self.b.set_sessions([session(1, updated=60), session(2)])
+        self.sid = self.b.sessions[0].id
+        self.b.meta.update(self.sid, conflict_fix={"pr": "github:acme/billing-api#9", "number": 9, "sha": "old"})
+        self.b.sessions[0].state = "done"
+        self.b.prs.fetched_at = NOW
+
+    def pr(self, **kw):
+        self.b.prs.mine = [mine(9, **{"merge": "clean", "head_sha": "new", **kw})]
+
+    def close(self, rc=0):
+        calls = []
+        cli = lambda args, cwd=None, timeout=60: calls.append(args) or SimpleNamespace(returncode=rc, stdout="", stderr="boom")
+        with mock.patch.object(ab, "run_cli", cli), mock.patch.object(ab, "load_sessions", lambda: list(self.b.sessions)):
+            ab.close_fixed_conflicts(self.b)
+        return calls
+
+    def test_a_pushed_fix_without_conflicts_is_stopped_and_deleted(self):
+        self.assertEqual(self.close(), [["stop", self.sid], ["rm", self.sid]])
+        self.assertIn("✓ conflicts in #9 resolved and pushed", self.b.msg)
+        self.assertNotIn("conflict_fix", self.b.meta.get(self.sid))
+
+    def test_one_that_did_not_push_or_left_conflicts_is_kept_and_not_asked_about_again(self):
+        for kw in ({"merge": "conflict", "head_sha": "old"}, {"merge": "conflict"}):
+            self.b.meta.update(self.sid, conflict_fix={"pr": "github:acme/billing-api#9", "number": 9, "sha": "old"})
+            self.pr(**kw)
+            self.assertEqual(self.close(), [])
+            self.assertEqual(self.b.finished_conflict_fixes(), [])
+        self.b.sessions[0].updated_at += 30  # you gave it more work: looked at again once it is done
+        self.assertEqual(len(self.b.finished_conflict_fixes()), 1)
+
+    def test_waits_while_it_works_while_mergeability_is_unknown_on_old_data_or_while_you_are_inside(self):
+        self.b.sessions[0].state = "working"
+        self.assertEqual(self.close(), [])
+        self.b.sessions[0].state = "done"
+        self.pr(merge="unknown")
+        self.assertEqual(self.close(), [])
+        self.pr()
+        self.b.prs.fetched_at = NOW - 120  # fetched before the session's last step
+        self.assertEqual(self.close(), [])
+        self.b.prs.fetched_at = NOW
+        self.b.prs.mine = []  # merged or closed meanwhile
+        self.assertEqual(self.close(), [])
+        self.pr()
+        self.b.attached = True
+        self.assertEqual(self.close(), [])
+        self.assertEqual(len(self.b.finished_conflict_fixes()), 1)  # still to be looked at
+
+    def test_on_gitlab_a_status_it_does_not_name_is_not_a_conflict(self):
+        self.pr(merge="unknown", provider="gitlab")
+        self.b.meta.update(self.sid, conflict_fix={"pr": "gitlab:acme/billing-api#9", "number": 9, "sha": "old"})
+        self.assertEqual(self.close(), [["stop", self.sid], ["rm", self.sid]])
+
+    def test_a_failed_delete_says_so(self):
+        self.close(rc=1)
+        self.assertIn("could not be closed: boom", self.b.msg)
+
+    def test_sessions_the_board_did_not_start_as_fixes_are_never_touched(self):
+        self.b.meta.update(self.sid, conflict_fix=None)
+        self.assertEqual(self.close(), [])
+
+    def test_a_finished_fix_asks_for_a_pr_refresh_once(self):
+        self.b.refresh_requested.clear()
+        self.b.set_sessions(list(self.b.sessions))
+        self.assertTrue(self.b.refresh_requested.is_set())
+        self.b.refresh_requested.clear()
+        self.b.set_sessions(list(self.b.sessions))
+        self.assertFalse(self.b.refresh_requested.is_set())
 
 
 class LinksToEveryNamedPr(unittest.TestCase):

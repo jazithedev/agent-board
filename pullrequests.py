@@ -94,6 +94,7 @@ class MyPr:
     requested: tuple[str, ...] = ()
     reviewed: bool = False
     unresolved: bool = False  # unresolved discussion threads (GitLab)
+    head_sha: str = ""
 
     @property
     def key(self) -> str:
@@ -245,7 +246,7 @@ def github_my_pr(node: dict) -> MyPr:
         created_at=parse_time(node.get("createdAt")), updated_at=parse_time(node.get("updatedAt")),
         decision=_DECISION.get(node.get("reviewDecision") or "", "none"), merge=merge, checks=checks,
         checks_stale=merge == "conflict" and bool(checks),  # a conflict stops new runs, so the result is an old one
-        requested=_requested(node), reviewed=bool(_reviews(node)),
+        requested=_requested(node), reviewed=bool(_reviews(node)), head_sha=node.get("headRefOid") or "",
     )
 
 
@@ -304,6 +305,7 @@ def gitlab_my_pr(mr: dict, detail: dict, approvals: dict) -> MyPr:
         requested=tuple(sorted((r.get("username") or "") for r in (mr.get("reviewers") or []) if r.get("username"))),
         reviewed=bool(approvals.get("approved_by")),
         unresolved=(detail.get("blocking_discussions_resolved", mr.get("blocking_discussions_resolved", True)) is False),
+        head_sha=detail.get("sha") or mr.get("sha") or "",
     )
 
 
@@ -369,7 +371,7 @@ _REQUESTS = """requests: timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last
 GITHUB_QUERY = f"""query {{
   viewer {{ login }}
   mine: search(query: "is:pr is:open author:@me archived:false", type: ISSUE, first: 100) {{
-    nodes {{ ... on PullRequest {{ {_PR_FIELDS} baseRefName headRefName reviewDecision mergeStateStatus
+    nodes {{ ... on PullRequest {{ {_PR_FIELDS} baseRefName headRefName headRefOid reviewDecision mergeStateStatus
       {_PEOPLE}
       commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}
   }}
