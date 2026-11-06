@@ -698,10 +698,15 @@ class CollectiveAutoApproval(unittest.TestCase):
         self.assertEqual(b.msg, "✗ could not auto-approve #10: nope")
 
 
+# Constants, not literals: gitleaks reads `….key: "<hex>"` as a leaked secret
+REREVIEW_SHA = "abc123def4567890"
+HEAD_SHA = "c0ffee1234567890"
+
+
 class AutoReReview(unittest.TestCase):
     """A PR you approved before that asks for your approval again gets a review session of its own, which approves it if safe."""
 
-    def again(self, n, sha="abc123def4567890", **kw):
+    def again(self, n, sha=REREVIEW_SHA, **kw):
         return review(n, approved_before=True, head_sha=sha, **kw)
 
     def test_picks_prs_approved_before_needing_approval_again_but_not_collectives(self):
@@ -727,7 +732,7 @@ class AutoReReview(unittest.TestCase):
             loader.refresh()
             loader.refresh()
             self.assertEqual(started, [7])
-            self.assertEqual(ab.Meta(b.meta.path).settings["auto_rereviewed"], {data.review[0].key: "abc123def4567890"})
+            self.assertEqual(ab.Meta(b.meta.path).settings["auto_rereviewed"], {data.review[0].key: REREVIEW_SHA})
             data.review = [self.again(7, sha="fffeee")]  # new commits after that: another look
             loader.refresh()
         self.assertEqual(started, [7, 7])
@@ -811,7 +816,7 @@ class CloseApprovedReReviews(unittest.TestCase):
 class AutoFixConflicts(unittest.TestCase):
     """A PR of yours with conflicts gets a session that resolves them, one per head commit."""
 
-    def conflicted(self, n, sha="c0ffee1234567890", **kw):
+    def conflicted(self, n, sha=HEAD_SHA, **kw):
         return mine(n, merge="conflict", head_sha=sha, **kw)
 
     def test_picks_your_conflicted_prs_with_a_head_commit(self):
@@ -852,7 +857,7 @@ class AutoFixConflicts(unittest.TestCase):
             loader.refresh()
             self.assertEqual(len(started), 1)
             self.assertIn("PR #7", started[0])
-            self.assertEqual(ab.Meta(b.meta.path).settings["conflicts_fixed"], {data.mine[0].key: "c0ffee1234567890"})
+            self.assertEqual(ab.Meta(b.meta.path).settings["conflicts_fixed"], {data.mine[0].key: HEAD_SHA})
             data.mine = [self.conflicted(7, sha="fffeee")]  # conflicts again at a new commit: another session
             loader.refresh()
         self.assertEqual(len(started), 2)
@@ -869,7 +874,7 @@ class AutoFixConflicts(unittest.TestCase):
         cli = lambda args, cwd=None, timeout=60: SimpleNamespace(returncode=0, stdout="backgrounded 1a2b3c4d · claude attach 1a2b3c4d\n", stderr="")
         with mock.patch.object(ab, "run_cli", cli), mock.patch.object(ab, "load_sessions", lambda: []):
             ab.start_conflict_session(b, b.prs.mine[0], auto=True)
-        self.assertEqual(b.meta.get("1a2b3c4d")["conflict_fix"], {"pr": b.prs.mine[0].key, "number": 7, "sha": "c0ffee1234567890"})
+        self.assertEqual(b.meta.get("1a2b3c4d")["conflict_fix"], {"pr": b.prs.mine[0].key, "number": 7, "sha": HEAD_SHA})
         self.assertIn("has conflicts: a session in billing-api resolves them", b.msg)
 
 
