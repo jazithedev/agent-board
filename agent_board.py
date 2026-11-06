@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import array
 import base64
+import copy
 import curses
 import fcntl
 import hashlib
@@ -37,10 +38,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.34.0"
+__version__ = "0.35.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -410,10 +412,23 @@ REREVIEW_PROMPT = (
 )
 MERGE_KEYS = {"s": "squash", "m": "merge", "r": "rebase"}
 DEFAULT_REVIEW_COMMAND_GITLAB = "Review these GitLab merge requests, reading each one and its diff with glab: {urls}"
-VIEW_ORDER = ("status", "project", "review", "mine")
+MENTION_REFRESH_CHOICES = [0, 5, 10, 15, 30, 60]  # minutes between Jira / Confluence loads; 0 = only when asked
+DEFAULT_MENTION_REFRESH = 15
+FIRST_LOAD_CHOICES = [7, 14, 30, 60]  # days the very first load looks back; later loads only ask for what changed since
+DEFAULT_FIRST_LOAD = 7
+ANSWERED_DAYS = 3  # a thread you replied in stays under "Answered by you" this long
+SNOOZE_SECONDS = 86400
+THREAD_GROUPS = [("waiting", "Waiting on you"), ("approve", "Asked to approve"), ("answered", "Answered by you")]
+REFRESHING_MENTIONS = "loading Jira and Confluence…"
+DEFAULT_REPLY_PROMPT = (
+    "{who} asked me something on {where} {ref} “{title}” ({url}). Read the whole thread and whatever it points to "
+    "(code, tickets, pages), then draft my reply in my voice. Do not post anything to Jira or Confluence: show me the draft and wait."
+)
+VIEW_ORDER = ("status", "project", "review", "mine", "mentions")
 PR_VIEWS = ("review", "mine")
-VIEW_LABEL = {"status": "by status", "project": "by project", "review": "review queue", "mine": "my pull requests"}
-TABS = (("sessions", "Sessions"), ("review", "Review queue"), ("mine", "My PRs"))  # the title row's tabs; Sessions is grouped by status or project
+TAB_VIEWS = (*PR_VIEWS, "mentions")  # every tab but Sessions: none of them has the prompt
+VIEW_LABEL = {"status": "by status", "project": "by project", "review": "review queue", "mine": "my pull requests", "mentions": "mentions"}
+TABS = (("sessions", "Sessions"), ("review", "Review queue"), ("mine", "My PRs"), ("mentions", "Mentions"))  # the title row's tabs; Sessions is grouped by status or project
 GROUPINGS = ("status", "project")
 REVIEW_GROUPINGS = ("project", "ticket")  # ticket: the key before the colon in the PR title
 NO_TICKET = "No ticket"
@@ -1126,9 +1141,9 @@ class Effect:
 
 
 HELP_COMMON_END = [
-    ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs (a click on a tab works too)"),
-    ("ctrl+l", "refresh pull requests now"),
-    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews, dictation"),
+    ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs, Mentions (a click on a tab works too)"),
+    ("ctrl+l", "refresh pull requests now (on the Mentions tab: load Jira and Confluence now)"),
+    ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews, Atlassian login, dictation"),
 ]
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
@@ -1188,6 +1203,21 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         *HELP_COMMON_END,
         ("esc", "clear the filter, then back to the session list"),
         ("mouse", "click opens a pull request; drag selects text and copies it"),
+    ],
+    "mentions": [
+        ("listed", "Jira / Confluence threads that asked you after your last word: @mentions, replies to your comments, records you approve"),
+        ("↑ / ↓", "move between threads"),
+        ("alt+↑ / alt+↓", "jump between groups"),
+        ("enter / click", "show the last comments under the row; enter again hides them"),
+        ("o", "open the thread in the browser"),
+        ("r", "a background session drafts your reply (it never posts); it starts in the folder set for the Jira project in ctrl+s"),
+        ("→", "open the reply session already on that thread (⟳)"),
+        ("d", "done: hide the thread until someone asks you there again"),
+        ("z", "snooze the thread for a day, or until someone asks you there again"),
+        ("ctrl+f", "filter threads"),
+        ("ctrl+l", "load what changed in Jira and Confluence now (otherwise every 15 minutes, set in ctrl+s)"),
+        ("ctrl+s", "settings: Atlassian site, e-mail and API token, how often to load, first load window, reply folders and prompt"),
+        ("esc", "clear the filter, then back to the session list"),
     ],
 }
 
@@ -1292,6 +1322,13 @@ class Board:
         self.fixes_seen_ending: set[tuple[str, float]] = set()  # (conflict fix, its last step) a refresh was already asked for
         self.placeholders: list[Session] = []  # rows for sessions still being started, until the real ones show up
         self.placeholder_seq = 0
+        self.atl = atl.Config(Path(os.devnull))  # the Atlassian login; the app loads the real file
+        self.threads: Optional[atl.Cache] = None  # Jira / Confluence threads, once loaded
+        self.thread_errors: list[str] = []
+        self.thread_busy = False
+        self.thread_sel: Optional[str] = None
+        self.thread_open: Optional[str] = None  # the thread whose last comments show under its row
+        self.mentions_requested = threading.Event()
 
     # ── data ──
     def choose_successor(self, sid: str) -> Optional[str]:
@@ -1686,7 +1723,7 @@ class Board:
 
     def _lists_blocked(self) -> bool:
         """The slash and @ lists belong to the prompt: they stay shut while anything else has the focus."""
-        blocked = self.sel is not None or self.mode in PR_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
+        blocked = self.sel is not None or self.mode in TAB_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
         return bool(blocked or self.settingsui or self.confirm or self.help or self.peek)
 
     def _trailing_word(self, sign: str) -> Optional[str]:
@@ -1999,6 +2036,165 @@ class Board:
     def selected_pr(self):
         return next((p for p in self.pr_flat() if p.key == self.pr_sel), None)
 
+    # ── mentions: Jira and Confluence threads ──
+    def mention_interval(self) -> int:
+        """Seconds between loads; 0 means only when asked (ctrl+l)."""
+        minutes = self.meta.settings.get("mention_refresh_minutes", DEFAULT_MENTION_REFRESH)
+        return int(minutes) * 60 if minutes in MENTION_REFRESH_CHOICES else DEFAULT_MENTION_REFRESH * 60
+
+    def first_load_days(self) -> int:
+        days = self.meta.settings.get("mention_first_load_days", DEFAULT_FIRST_LOAD)
+        return days if days in FIRST_LOAD_CHOICES else DEFAULT_FIRST_LOAD
+
+    def thread_marks(self) -> dict:
+        marks = self.meta.settings.get("mention_marks")
+        return marks if isinstance(marks, dict) else {}
+
+    def thread_state(self, t: atl.Thread) -> Optional[str]:
+        """waiting | approve | answered, or None when the thread is not shown (done, snoozed or long answered).
+        Done and snooze last until someone asks you there again."""
+        m = self.thread_marks().get(t.key) or {}
+        if m.get("done", 0) >= t.asked_at and m.get("done"):
+            return None
+        if m.get("snooze", 0) > self.now() and m.get("at", 0) >= t.asked_at:
+            return None
+        if t.kind == "approve":
+            return "approve"
+        if t.waiting:
+            return "waiting"
+        if t.answered_at and self.now() - t.answered_at <= ANSWERED_DAYS * 86400:
+            return "answered"
+        return None
+
+    def snoozed(self) -> int:
+        now = self.now()
+        return sum(1 for t in (self.threads.threads.values() if self.threads else [])
+                   if (m := self.thread_marks().get(t.key) or {}).get("snooze", 0) > now and m.get("at", 0) >= t.asked_at)
+
+    def _matches_thread(self, t: atl.Thread) -> bool:
+        q = self.query.strip().lower()
+        hay = " ".join([t.ref, t.title, t.asked_by, t.status, t.source]).lower()
+        return all(part in hay for part in q.split())
+
+    def thread_groups(self) -> list[tuple[str, str, list[atl.Thread]]]:
+        """(state, heading, threads) for the Mentions tab, newest question first."""
+        if not self.threads:
+            return []
+        by_state: dict[str, list[atl.Thread]] = {}
+        for t in self.threads.threads.values():
+            state = self.thread_state(t)
+            if state and self._matches_thread(t):
+                by_state.setdefault(state, []).append(t)
+        out = []
+        for state, title in THREAD_GROUPS:
+            items = by_state.get(state, [])
+            key = (lambda t: -t.answered_at) if state == "answered" else (lambda t: -t.asked_at)
+            if items:
+                out.append((state, title, sorted(items, key=key)))
+        return out
+
+    def thread_flat(self) -> list[atl.Thread]:
+        return [t for _, _, items in self.thread_groups() for t in items]
+
+    def selected_thread(self) -> Optional[atl.Thread]:
+        return next((t for t in self.thread_flat() if t.key == self.thread_sel), None)
+
+    def _move_thread(self, delta: int) -> None:
+        keys = [t.key for t in self.thread_flat()]
+        if not keys:
+            self.thread_sel = None
+        elif self.thread_sel not in keys:
+            self.thread_sel = keys[0] if delta > 0 else keys[-1]
+        else:
+            self.thread_sel = keys[max(0, min(len(keys) - 1, keys.index(self.thread_sel) + delta))]
+
+    def _jump_thread_group(self, delta: int) -> None:
+        groups = self.thread_groups()
+        if not groups:
+            return
+        cur = next((i for i, g in enumerate(groups) if any(t.key == self.thread_sel for t in g[2])), -1)
+        self.thread_sel = groups[max(0, min(len(groups) - 1, cur + delta))][2][0].key
+
+    def mark_thread(self, t: atl.Thread, how: str) -> None:
+        """done or snooze, kept in meta.json; marks of threads no longer cached are dropped on the way."""
+        now = self.now()
+        cached = set(self.threads.threads) if self.threads else set()
+        marks = {k: v for k, v in self.thread_marks().items() if k in cached}
+        marks[t.key] = {"done": now} if how == "done" else {"snooze": now + SNOOZE_SECONDS, "at": now}
+        self.meta.set_setting("mention_marks", marks)
+        if self.thread_open == t.key:
+            self.thread_open = None
+
+    def thread_counts(self) -> dict:
+        counts = {"waiting": 0, "approve": 0, "jira": 0, "confluence": 0}
+        for t in self.threads.threads.values() if self.threads else []:
+            state = self.thread_state(t)
+            if state in ("waiting", "approve"):
+                counts[state] += 1
+                counts[t.source] += 1
+        return counts
+
+    def reply_folders(self) -> dict[str, str]:
+        """Jira project key -> the folder its reply sessions start in, from "BI=/srv/www/tools, FP=/srv/www/web"."""
+        out = {}
+        for part in re.split(r"[,\n]", self.meta.settings.get("reply_folders", "")):
+            key, sep, path = part.partition("=")
+            if sep and key.strip() and path.strip():
+                out[key.strip().upper()] = os.path.expanduser(path.strip())
+        return out
+
+    def reply_folder(self, t: atl.Thread) -> str:
+        return self.reply_folders().get(t.project.upper(), "") if t.project else ""
+
+    def thread_sessions(self, t: atl.Thread) -> list[Session]:
+        """Reply sessions started for this thread: they carry its title as their name."""
+        title = reply_title(t)
+        return [s for s in self.sessions if s.name == title or self.name_of(s) == title]
+
+    def _handle_mentions(self, key: str, ch: str) -> Optional[Effect]:
+        t = self.selected_thread()
+        if key == "esc":
+            if self.query:
+                self.query = ""
+            else:
+                self.set_tab("sessions")
+        elif key == "up":
+            self._move_thread(-1)
+        elif key == "down":
+            self._move_thread(1)
+        elif key == "alt+up":
+            self._jump_thread_group(-1)
+        elif key == "alt+down":
+            self._jump_thread_group(1)
+        elif key == "enter" and t:
+            self.thread_open = None if self.thread_open == t.key else t.key
+        elif key == "right" and t:
+            linked = sorted(self.thread_sessions(t), key=lambda s: (s.group != "working", -s.updated_at))
+            if linked:
+                return Effect("attach", session_id=linked[0].id)
+            self.msg = "no session on this thread yet: r starts one that drafts your reply"
+        elif key == "char" and ch == "o" and t:
+            return Effect("browse", url=t.url)
+        elif key == "char" and ch == "r" and t:
+            return Effect("reply", items=[t])
+        elif key == "char" and ch in ("d", "z") and t:
+            nxt = self.thread_flat()
+            i = [x.key for x in nxt].index(t.key)
+            self.mark_thread(t, "done" if ch == "d" else "snooze")
+            rest = [x.key for x in self.thread_flat()]
+            after = [x.key for x in nxt[i + 1 :] if x.key in rest] + [x.key for x in nxt[:i][::-1] if x.key in rest]
+            self.thread_sel = after[0] if after else None
+            self.msg = f"✓ {t.ref or t.title}: " + ("done until someone asks you there again" if ch == "d" else "snoozed for a day, or until someone asks you there again")
+        elif key == "ctrl+l":
+            return Effect("refresh_mentions")
+        elif key == "ctrl+s":
+            self.settingsui = {"idx": 0, "edit": None}
+        elif key == "ctrl+f":
+            self.edit = {"kind": "find", "text": self.query, "sid": "", "cursor": len(self.query)}
+        elif key == "char" and ch == "?":
+            self.help = True
+        return None
+
     @property
     def grouping(self) -> str:
         """How the Sessions tab groups its sessions: "status" or "project", remembered between runs."""
@@ -2013,7 +2209,7 @@ class Board:
 
     @property
     def tab(self) -> str:
-        return self.mode if self.mode in PR_VIEWS else "sessions"
+        return self.mode if self.mode in TAB_VIEWS else "sessions"
 
     def set_tab(self, tab: str) -> None:
         self.mode = self.grouping if tab == "sessions" else tab
@@ -2029,17 +2225,28 @@ class Board:
             self.meta.set_setting("review_grouping", "ticket" if self.review_grouping == "project" else None)
             self.scroll = 0
             return
-        if self.mode in PR_VIEWS:
+        if self.mode in TAB_VIEWS:
             return
         self.meta.set_setting("grouping", "project" if self.grouping == "status" else None)
         self.mode = self.grouping
         self.scroll = 0
 
     def settings_fields(self) -> list[tuple[str, str]]:
-        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews"), ("autofix", "Auto fix conflicts"), ("dictate_record", "Dictation recorder"), ("dictate_cmd", "Dictation command")]
+        return [("refresh", "PR refresh"), ("pr_projects", "PR projects"), ("drafts", "Include drafts"), ("age", "Review queue age"), ("rereview", "Auto re-review"), ("review_cmd", "Review command"), ("review_cmd_gl", "GitLab review prompt"), ("team_reviews", "Team reviews"), ("autofix", "Auto fix conflicts"),
+                ("atl_site", "Atlassian site"), ("atl_email", "Atlassian e-mail"), ("atl_token", "Atlassian API token"), ("mention_refresh", "Mentions refresh"),
+                ("first_load", "Mentions first load"), ("reply_folders", "Reply folders"), ("reply_cmd", "Reply prompt"),
+                ("dictate_record", "Dictation recorder"), ("dictate_cmd", "Dictation command")]
 
     def setting_text(self, name: str) -> str:
         s = self.meta.settings
+        if name in ("atl_site", "atl_email"):
+            return getattr(self.atl, name[4:])
+        if name == "atl_token":
+            return ""  # never shown: typing replaces it
+        if name == "reply_folders":
+            return s.get("reply_folders", "")
+        if name == "reply_cmd":
+            return s.get("reply_command", DEFAULT_REPLY_PROMPT)
         if name == "review_cmd":
             return s.get("review_command", DEFAULT_REVIEW_COMMAND)
         if name == "review_cmd_gl":
@@ -2052,7 +2259,15 @@ class Board:
 
     def _commit_setting(self, name: str, text: str) -> None:
         text = text.strip()
-        if name == "review_cmd":
+        if name.startswith("atl_"):
+            if text or name != "atl_token":  # enter on an empty token keeps the one you have
+                self.atl.set(name[4:], text)
+                self.mentions_requested.set()
+        elif name == "reply_folders":
+            self.meta.set_setting("reply_folders", text or None)
+        elif name == "reply_cmd":
+            self.meta.set_setting("reply_command", None if text in ("", DEFAULT_REPLY_PROMPT) else text)
+        elif name == "review_cmd":
             self.meta.set_setting("review_command", None if text in ("", DEFAULT_REVIEW_COMMAND) else text)
         elif name == "review_cmd_gl":
             self.meta.set_setting("review_command_gitlab", None if text in ("", DEFAULT_REVIEW_COMMAND_GITLAB) else text)
@@ -2128,7 +2343,16 @@ class Board:
             i = REVIEW_AGE_CHOICES.index(self.review_age_days())
             days = REVIEW_AGE_CHOICES[(i + (-1 if key == "left" else 1)) % len(REVIEW_AGE_CHOICES)]
             self.meta.set_setting("review_max_age_days", None if days == DEFAULT_REVIEW_AGE else days)
-        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "autofix", "pr_projects", "team_reviews"):
+        elif name == "mention_refresh" and key in ("left", "right", "enter", "space"):
+            cur = self.mention_interval() // 60
+            i = MENTION_REFRESH_CHOICES.index(cur) if cur in MENTION_REFRESH_CHOICES else MENTION_REFRESH_CHOICES.index(DEFAULT_MENTION_REFRESH)
+            minutes = MENTION_REFRESH_CHOICES[(i + (-1 if key == "left" else 1)) % len(MENTION_REFRESH_CHOICES)]
+            self.meta.set_setting("mention_refresh_minutes", None if minutes == DEFAULT_MENTION_REFRESH else minutes)
+        elif name == "first_load" and key in ("left", "right", "enter", "space"):
+            i = FIRST_LOAD_CHOICES.index(self.first_load_days())
+            days = FIRST_LOAD_CHOICES[(i + (-1 if key == "left" else 1)) % len(FIRST_LOAD_CHOICES)]
+            self.meta.set_setting("mention_first_load_days", None if days == DEFAULT_FIRST_LOAD else days)
+        elif key == "enter" and name not in ("refresh", "drafts", "age", "rereview", "autofix", "pr_projects", "team_reviews", "mention_refresh", "first_load"):
             ui["edit"] = {"field": name, "text": self.setting_text(name)}
         return None
 
@@ -2235,7 +2459,10 @@ class Board:
         if owner in self.busy:
             self.msg = f"{self.busy[owner]}"
             return
-        if self.mode in PR_VIEWS:
+        if self.mode == "mentions":
+            self.thread_open = None if self.thread_open == owner and self.thread_sel == owner else owner
+            self.thread_sel = owner
+        elif self.mode in TAB_VIEWS:
             self.pr_sel = owner
             pr = self.selected_pr()
             if pr:
@@ -2267,7 +2494,7 @@ class Board:
             modal = self.confirm or self.help or self.peek or self.picker or self.modelpicker or self.tagpicker or self.settingsui or self.edit
             if modal:
                 return self.handle("esc")
-            if self.input and self.mode not in PR_VIEWS:
+            if self.input and self.mode not in TAB_VIEWS:
                 self.reset_prompt()
                 self.msg = "prompt cleared"
             else:
@@ -2408,7 +2635,7 @@ class Board:
         """A click in the prompt puts the caret at the nearest character boundary of the row clicked."""
         hit = self.prompt_hit
         row = [b for b in hit[2] if b[0] == y - hit[0]] if hit else []
-        if not row or self.mode in PR_VIEWS:
+        if not row or self.mode in TAB_VIEWS:
             return
         self.sel = None
         self.cursor = min(row, key=lambda b: abs(hit[1] + b[1] - x))[2]
@@ -2469,7 +2696,7 @@ class Board:
             e["text"], e["cursor"] = e["text"][:c] + flat + e["text"][c:], c + len(flat)
             if self.edit["kind"] == "find":
                 self.query = self.edit["text"]
-        elif self.mode in PR_VIEWS:
+        elif self.mode in TAB_VIEWS:
             self.msg = "paste goes into the prompt: switch to the Sessions tab (alt+←)"
         elif text:
             self.sel = None
@@ -2564,7 +2791,9 @@ class Board:
         if key == "ctrl+b":
             self.toggle_grouping()
             return None
-        if self.mode in PR_VIEWS:
+        if self.mode == "mentions":
+            return self._handle_mentions(key, ch)
+        if self.mode in TAB_VIEWS:
             return self._handle_pr_view(key, ch)
         if key == DICTATE_KEY:
             return self._toggle_dictation()
@@ -2835,15 +3064,112 @@ def pr_body(board: Board, width: int) -> tuple[list[Line], list[Optional[str]], 
     return body, owners, sel_range
 
 
+SOURCE_MARK = {"jira": ("J", "proj0"), "confluence": ("C", "proj1")}
+THREAD_COMMENTS_SHOWN = 3  # comments shown under an opened thread
+THREAD_COMMENT_LINES = 4  # lines each of them may take
+
+
+def reply_title(t: atl.Thread) -> str:
+    """The reply session's name, the same every time, so the row can find the session again (⟳)."""
+    return f"Reply: {t.ref}" if t.source == "jira" else f"Reply: {t.title}"
+
+
+def thread_row(board: Board, t: atl.Thread, state: str, width: int, selected: bool) -> list[Line]:
+    now = board.now()
+    mark, mark_style = SOURCE_MARK.get(t.source, ("?", "dim"))
+    lead: list[Seg] = [("▌" if selected else " ", "accent"), (" ", "normal"), (mark, mark_style), ("  ", "normal")]
+    if t.source == "jira":
+        lead += [(f"{t.ref:<9}", "accent"), (" ", "normal")]
+    chip = {
+        "waiting": (" replied to you " if t.kind == "reply" else " asked ", "chip_warn"),
+        "approve": (f" approver · {t.status} ", "chip_info"),
+        "answered": (" you replied ", "chip_good"),
+    }[state]
+    when = t.answered_at if state == "answered" else t.asked_at
+    right: list[Seg] = [(f"@{t.asked_by}" if t.asked_by else "", "dim"), (f"  {fmt_age(now - when) if when else '':>4}", "dim")]
+    linked = board.thread_sessions(t)
+    if linked:
+        right.append((f"  ⟳{len(linked)}" if len(linked) > 1 else "  ⟳", "accent"))
+    room = width - seg_width(lead) - seg_width(right) - cell_width(chip[0]) - 3
+    title = fit(t.title, max(8, room))
+    left = lead + [(title, "name_sel" if selected else "name"), ("  ", "normal"), chip]
+    out = [Line(left + [(" " * max(1, width - seg_width(left) - seg_width(right)), "normal")] + right, selected)]
+    indent = " " * (4 + (10 if t.source == "jira" else 0))
+    if board.thread_open == t.key:
+        shown = t.comments[-THREAD_COMMENTS_SHOWN:]
+        for c in shown:
+            who = "you" if c.mine else c.author
+            out.append(Line([(indent + "│ ", "faint"), (who, "done" if c.mine else "head"), (f" · {fmt_age(now - c.at)}" if c.at else "", "faint")]))
+            body = [x for x in wrap_lines((c.text or "(no text)").split("\n"), max(10, width - len(indent) - 6)) if x.strip()]
+            for i, text in enumerate(body[:THREAD_COMMENT_LINES]):
+                last = i == THREAD_COMMENT_LINES - 1 and len(body) > THREAD_COMMENT_LINES
+                out.append(Line([(indent + "│   ", "faint"), (fit(text, max(10, width - len(indent) - 6)) + (" …" if last else ""), "warn" if c.mentions_me else "normal")]))
+        more = [f"{t.total} comment{'s' if t.total != 1 else ''}" if t.total else "", t.status if t.source == "jira" else "", "o opens it in the browser"]
+        out.append(Line([(indent + "│ ", "faint"), (" · ".join(m for m in more if m), "faint")]))
+    elif state == "waiting" and t.question:
+        out.append(Line([(indent, "normal"), (fit(f"“{' '.join(t.question.split())}”", max(10, width - len(indent) - 2)), "faint")]))
+    return out
+
+
+def mention_body(board: Board, width: int) -> tuple[list[Line], list[Optional[str]], Optional[tuple[int, int]]]:
+    if not board.atl.ready and not board.threads:
+        text = [
+            "   The Mentions tab lists Jira and Confluence threads that wait on you.",
+            "   It needs an Atlassian login: ctrl+s → Atlassian site, e-mail and API token.",
+            "   Create the token at https://id.atlassian.com/manage-profile/security/api-tokens",
+        ]
+        return [Line([])] + [Line([(t, "faint")]) for t in text], [None] * 4, None
+    if board.threads is None:
+        text = "   Loading Jira and Confluence…" if board.thread_busy else "   Not loaded yet: ctrl+l loads Jira and Confluence"
+        return [Line([]), Line([(text, "faint")])], [None, None], None
+    body: list[Line] = []
+    owners: list[Optional[str]] = []
+    sel_range: Optional[tuple[int, int]] = None
+    for gi, (state, title, items) in enumerate(board.thread_groups()):
+        if gi:
+            body.append(Line([]))
+            owners.append(None)
+        note = f"{ANSWERED_DAYS} days after your reply they go" if state == "answered" else ""
+        body.append(group_header(title, note, len(items), width))
+        owners.append(None)
+        for t in items:
+            selected = t.key == board.thread_sel
+            rows = thread_row(board, t, state, width, selected)
+            if selected:
+                sel_range = (len(body), len(body) + len(rows))
+            body.extend(rows)
+            owners.extend([t.key] * len(rows))
+    if not body:
+        text = "   Nothing in Jira or Confluence waits on you ✓" if not board.query else "   No thread matches your search"
+        body, owners = [Line([]), Line([(text, "faint")])], [None, None]
+    problems = [Line([("  ", "normal"), ("⚠ " + fit(e, max(10, width - 6)), "wait")]) for e in board.thread_errors[:3]]
+    if problems:
+        body += [Line([])] + problems
+        owners += [None] * (len(problems) + 1)
+    return body, owners, sel_range
+
+
+def mention_segs(board: Board) -> list[Seg]:
+    """The Mentions part of the strip, once Jira and Confluence were loaded."""
+    if not board.threads:
+        return []
+    c = board.thread_counts()
+    n = c["waiting"] + c["approve"]
+    if not n:
+        return [("@ ", "strip"), ("0 threads", "strip"), ("    ", "normal")]
+    return [("@ ", "accent"), (str(n), "accent"), (f" thread{'s' if n != 1 else ''} wait on you", "accent"), ("    ", "normal")]  # right after the review count: it is cut last
+
+
 def strip_segs(board: Board, width: int) -> list[Seg]:
     """The always-visible pull-request line: brighter than the faint chrome, since it carries the numbers you act on."""
     data = board.prs
     if data is None:
         text = "PRs: loading…" if board.pr_busy else "PRs: not loaded"
-        return [(" ", "normal"), (text, "strip"), (" ", "normal")]
+        return [(" ", "normal"), (text, "strip"), ("    ", "normal")] + mention_segs(board)
     c = board.pr_counts()
     segs: list[Seg] = [(" ", "normal")]
     segs += [("⇣ ", "accent" if c["review"] else "strip"), (str(c["review"]), "accent" if c["review"] else "strip_bold"), (" to review", "accent" if c["review"] else "strip"), ("    ", "normal")]
+    segs += mention_segs(board)
     if c["attention"]:
         short = {"conflicts": "conflict", "changes requested": "changes", "checks failing": "CI failing", "unresolved threads": "threads"}
         why = " · ".join(f"{n} {short.get(r, r)}" for r, n in c["reasons"].items())
@@ -2928,16 +3254,31 @@ def _overlay_settings(board: Board, lines: list[Line], width: int) -> None:
         elif name == "age":
             days = board.review_age_days()
             shown = [("◂ ", "faint"), (f"hide PRs older than {days} days" if days else "show every PR", "bold"), (" ▸", "faint")]
+        elif name == "mention_refresh":
+            minutes = board.mention_interval() // 60
+            shown = [("◂ ", "faint"), ("only when I press ctrl+l" if minutes == 0 else f"every {minutes} min", "bold"), (" ▸", "faint"), ("  loads only what changed since the last load", "faint")]
+        elif name == "first_load":
+            shown = [("◂ ", "faint"), (f"look back {board.first_load_days()} days", "bold"), (" ▸", "faint"), ("  only for the very first load", "faint")]
+        elif name == "atl_token" and not (ui["edit"] and ui["edit"]["field"] == name):
+            token = board.atl.token
+            shown = [(f"set (…{token[-4:]})" if token else "not set (enter to add; create one at id.atlassian.com)", "dim" if token else "faint")]
+        elif name == "reply_folders" and not (ui["edit"] and ui["edit"]["field"] == name) and not board.setting_text(name):
+            shown = [(fit("not set (enter to add: BI=/srv/www/tools, FP=… a Jira project key and its folder)", max(10, width - 32)), "faint")]
         else:
             text = board.setting_text(name)
             if ui["edit"] and ui["edit"]["field"] == name:
-                shown = [(ui["edit"]["text"], "bold"), ("▏", "accent")]
+                shown = [(secret_text(name, ui["edit"]["text"]), "bold"), ("▏", "accent")]
             else:
                 shown = [(fit(text, max(10, width - 44)) if text else "not set (enter to add)", "dim" if text else "faint")]
         rows.append([arrow, (f"{label:<24}", "name_sel" if on else "name")] + shown + [(" ", "normal")])
     if ui.get("projects") is not None:
         rows = pr_project_rows(board, len(lines) - HEADER_ROWS - 8)
     _paste(lines, _box(rows, width, len(lines) - HEADER_ROWS, "settings · PR projects" if ui.get("projects") is not None else "settings"), width)
+
+
+def secret_text(field_name: str, text: str) -> str:
+    """The API token is never drawn: a dot per character while it is typed or pasted."""
+    return "•" * len(text) if field_name == "atl_token" else text
 
 
 def pr_project_rows(board: Board, visible: int) -> list[list[Seg]]:
@@ -2977,6 +3318,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         tabs.append(("  demo data", "wait"))
     if seg_width(brand) + seg_width(tabs) > inner:
         brand = [(f" {APP_MARK} ", "accent")]  # a narrow screen keeps the tabs and drops the name
+    if seg_width(brand) + seg_width(tabs) + 1 + cell_width(summary) > inner:  # the short form first, then nothing
+        summary = f"{counts['awaiting']} awaiting · {counts['working']} working · " + (f"{counts['idle']} idle · " if counts["idle"] else "") + f"{counts['done']} done"
     if seg_width(brand) + seg_width(tabs) + 1 + cell_width(summary) > inner:
         summary = ""
     board.tab_hit, col = [], seg_width(brand)
@@ -2998,8 +3341,10 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     owners: list[Optional[str]] = []
     sel_range: Optional[tuple[int, int]] = None
     rename_at: Optional[tuple[int, int]] = None  # (body row, column) of the in-place rename cursor
-    groups = board.groups() if board.mode not in PR_VIEWS else []
-    if board.mode in PR_VIEWS:
+    groups = board.groups() if board.mode not in TAB_VIEWS else []
+    if board.mode == "mentions":
+        body, owners, sel_range = mention_body(board, inner)
+    elif board.mode in TAB_VIEWS:
         body, owners, sel_range = pr_body(board, inner)
     for gi, (title, subtitle, items) in enumerate(groups):
         if gi:
@@ -3022,7 +3367,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
                 sel_range = (len(body), len(body) + len(rows))
             body.extend(rows)
             owners.extend([s.id] * len(rows))
-    if not body and board.mode not in PR_VIEWS:
+    if not body and board.mode not in TAB_VIEWS:
         owners = [None, None]
         body = [Line([]), Line([("   No sessions" + (" match your search" if board.query else " yet — type a task below"), "faint")])]
     # The LIMITS block, and the USAGE panel above it, are pinned under the list; a long list scrolls in the rows left above them
@@ -3044,7 +3389,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
             board.scroll = top
         if sel_range[1] > board.scroll + body_h:
             board.scroll = sel_range[1] - body_h
-    elif board.mode not in PR_VIEWS and board.sel is None:
+    elif board.mode not in TAB_VIEWS and board.sel is None:
         board.scroll = 0  # back in the prompt: the list returns to its top
     board.scroll = max(0, min(board.scroll, max(0, len(body) - body_h)))
     view = body[board.scroll : board.scroll + body_h]
@@ -3099,15 +3444,23 @@ def prompt_area(board: Board, width: int, inner: int, max_rows: int) -> tuple[li
     if editing_setting:
         name = dict(board.settings_fields()).get(editing_setting["field"], "setting")
         pre = [(" ", "normal"), (f"✎ {name} ", "accent")]
-        line = Line(pre + [(fit(editing_setting["text"], max(5, width - seg_width(pre) - 1)), "bold")])
-        return [line], (0, min(width - 1, seg_width(pre) + cell_width(editing_setting["text"]))), None
+        text = secret_text(editing_setting["field"], editing_setting["text"])
+        line = Line(pre + [(fit(text, max(5, width - seg_width(pre) - 1)), "bold")])
+        return [line], (0, min(width - 1, seg_width(pre) + cell_width(text))), None
     if board.edit and board.edit["kind"] == "find":  # a rename is edited in the session's own row instead
         label = "⌕ find "
         pre = [(" ", "normal"), (label, "accent")]
         text = board.edit["text"]
         shown, col, _ = prompt_window(text, board.edit.get("cursor", len(text)), width - seg_width(pre) - 1, "bold")
         return [Line(pre + shown)], (0, min(width - 1, seg_width(pre) + col)), None
-    if board.mode in PR_VIEWS:
+    if board.mode == "mentions":
+        text = "enter reads the thread · r drafts your reply in a session · d done · z snooze a day"
+        if board.snoozed():
+            text += f" · {board.snoozed()} snoozed"
+        if board.threads and board.threads.loaded_at:
+            text += f" · loaded {fmt_until(board.now() - board.threads.loaded_at)} ago" if not board.thread_busy else " · loading…"
+        return [Line([(" ", "normal"), ("  ", "accent"), (text, "faint")])], None, None
+    if board.mode in TAB_VIEWS:
         n = len(board.marked)
         text = f"{n} marked for review" if n else ("space marks a PR for review, r starts a review session" if board.mode == "review" else "enter opens a PR; a ⟳ marks a PR a session is already working on")
         old = board.hidden_by_age() if board.mode == "review" and not n else 0
@@ -3448,6 +3801,8 @@ def _hint_segs(board: Board) -> list[Seg]:
         hint = "space mark · ctrl+a all · r review · a approve · enter open · o browser · ctrl+b group · ctrl+l refresh · ctrl+s settings · esc back"
     elif board.mode == "mine":
         hint = "enter open · f fix conflicts · o browser · ctrl+l refresh · ctrl+s settings · alt+←/→ tabs · esc back"
+    elif board.mode == "mentions":
+        hint = "enter thread · o browser · r draft reply · d done · z snooze · ctrl+l load now · ctrl+s settings · ? keys · esc back"
     elif board.sel:
         s = board.selected()
         stop = "stop" if s and s.group == "working" else "delete"
@@ -4373,6 +4728,79 @@ class PrLoader(threading.Thread):
             self.stop.wait(1)
 
 
+class MentionLoader(threading.Thread):
+    """Loads Jira and Confluence threads: the first time a few days back, after that only what changed since the last
+    load, every interval (read every second, so a settings change takes effect at once) or when asked."""
+
+    def __init__(self, board: Board, http: Optional[atl.Http] = None, cache_path: Path = atl.CACHE_PATH):
+        super().__init__(daemon=True)
+        self.board, self.http, self.cache_path = board, http, cache_path
+        self.stop = threading.Event()
+
+    def refresh(self) -> None:
+        board = self.board
+        if not board.atl.ready:
+            if board.msg.startswith(REFRESHING_MENTIONS):
+                board.msg = "✗ set the Atlassian site, e-mail and API token in ctrl+s first"
+            return
+        board.thread_busy = True
+        cache = copy.deepcopy(board.threads) if board.threads else atl.Cache.load(self.cache_path)  # the screen keeps reading the old one meanwhile
+        try:
+            board.thread_errors = atl.refresh(cache, board.atl, time.time(), board.first_load_days(), self.http)
+        except Exception as exc:  # keep the board alive and say what went wrong
+            board.thread_errors = [f"loading failed: {exc}"]
+        finally:
+            board.thread_busy = False
+        cache.prune(time.time(), keep={k for k, m in board.thread_marks().items() if m.get("done")})
+        cache.save(self.cache_path)
+        board.threads = cache
+        if board.msg.startswith(REFRESHING_MENTIONS):
+            c = board.thread_counts()
+            board.msg = (f"✗ {board.thread_errors[0]}" if board.thread_errors
+                         else f"✓ Jira and Confluence loaded · {c['waiting'] + c['approve']} thread{'s' if c['waiting'] + c['approve'] != 1 else ''} wait on you")
+
+    def run(self) -> None:
+        if self.board.threads is None:
+            cached = atl.Cache.load(self.cache_path)
+            if cached.loaded_at:
+                self.board.threads = cached  # what the last run saw, at once, while the changes load
+        last, first = 0.0, True
+        while not self.stop.is_set():
+            interval = self.board.mention_interval()
+            if first or self.board.mentions_requested.is_set() or (interval and time.time() - last >= interval):
+                first = False
+                self.board.mentions_requested.clear()
+                self.refresh()
+                last = time.time()
+            self.stop.wait(1)
+
+
+def reply_prompt(board: Board, t: atl.Thread) -> str:
+    template = board.meta.settings.get("reply_command", DEFAULT_REPLY_PROMPT)
+    where = "Jira" if t.source == "jira" else "the Confluence page"
+    values = {"who": t.asked_by or "Someone", "where": where, "ref": t.ref if t.source == "jira" else "", "title": t.title, "url": t.url}
+    prompt = template
+    for k, v in values.items():
+        prompt = prompt.replace("{" + k + "}", v)
+    return " ".join(prompt.split())
+
+
+def start_reply_session(board: Board, t: atl.Thread) -> None:
+    """A background session that reads the thread and drafts your answer; it never posts it."""
+    folder = board.reply_folder(t) or str(Path.home())
+    try:
+        r = run_cli(bg_command(reply_prompt(board, t), board.model(), reply_title(t)), cwd=folder)
+    except (OSError, subprocess.SubprocessError) as exc:
+        board.msg = f"✗ could not start a reply session: {exc}"
+        return
+    if r.returncode == 0:
+        where = os.path.basename(folder.rstrip("/")) or folder
+        board.msg = f"✓ a session in {where} drafts your reply to {t.ref or t.title}: → opens it once the ⟳ shows"
+    else:
+        board.msg = f"✗ could not start a reply session: {((r.stderr or r.stdout).strip().splitlines() or ['failed'])[0]}"
+    board.set_sessions(load_sessions())
+
+
 def run_cli(args: list[str], cwd: Optional[str] = None, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run([CLAUDE, *args], capture_output=True, text=True, cwd=cwd, timeout=timeout)
 
@@ -4820,6 +5248,13 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         board.refresh_requested.set()
         board.msg = REFRESHING
         return True
+    if effect.kind == "refresh_mentions":
+        board.mentions_requested.set()
+        board.msg = REFRESHING_MENTIONS
+        return True
+    if effect.kind == "reply":
+        start_reply_session(board, effect.items[0])
+        return True
     if effect.kind == "browse":
         board.msg = open_url(effect.url)
         return True
@@ -4931,11 +5366,14 @@ def main_loop(scr, demo: bool) -> None:
         board.limits = demo_limits(board.now())
         board.disk = demo_disk()
         board.prs = demo_prs(board.now())
+        board.threads = demo_threads(board.now())
     else:
+        board.atl = atl.Config()
         UsageLoader(board, UsageScanner()).start()
         LimitsLoader(board).start()
         PrLoader(board).start()
         DiskLoader(board).start()
+        MentionLoader(board).start()
     try:
         while True:
             sync_size(scr)
@@ -5047,6 +5485,34 @@ def demo_prs(now: float) -> prs.PrData:
     return prs.PrData(mine=mine, review=review, errors=[], fetched_at=now - 4 * 60, repos=repos)
 
 
+def demo_threads(now: float) -> atl.Cache:
+    h, day, site = 3600, 86400, "https://acme.atlassian.net"
+    C = atl.Comment
+    threads = [
+        atl.Thread("jira:WEB-5149", "jira", "mention", "WEB-5149", "Report management: cancel endpoint", f"{site}/browse/WEB-5149", "WEB", "Blocked",
+                   "Anna", now - 2 * h, now - 4 * h, now - 1 * h, comments=[
+                       C("you", now - 4 * h, "1. The insights service cannot cancel a running task, so I would not build this.", mine=True),
+                       C("Anna", now - 2 * h, "Agreed on the state map. @Jazi do I understand you correctly that we don't need Cancel at all?", mentions_me=True),
+                       C("Alex", now - 1 * h, "@Alex to follow up with Support on how important cancelling a run is."),
+                   ], total=5),
+        atl.Thread("confluence:9001", "confluence", "mention", "ENG", "Sync service: public API", f"{site}/wiki/spaces/ENG/pages/900?focusedCommentId=9001", status="ENG",
+                   asked_by="Roman", asked_at=now - 18 * day, updated_at=now - 18 * day, page="900", comments=[
+                       C("Roman", now - 18 * day, "@Jazi you mentioned there is no bulk operation, and here we have bulk in the URL. Should it be changed?", mentions_me=True),
+                   ], total=1),
+        atl.Thread("confluence:9002", "confluence", "reply", "ENG", "ADR-0010: where a refusal becomes an HTTP response", f"{site}/wiki/spaces/ENG/pages/901?focusedCommentId=9002",
+                   status="ENG", asked_by="Roman", asked_at=now - 3 * day, answered_at=now - 4 * day, updated_at=now - 3 * day, page="901", comments=[
+                       C("you", now - 4 * day, "The handler throws; the controller maps it to a 422.", mine=True),
+                       C("Roman", now - 3 * day, "Should we have details at all? You will only ever have one exception there."),
+                   ], total=2),
+        atl.Thread("approve:902", "confluence", "approve", "ENG", "DR #13: delete a post's photo when the post goes?", f"{site}/wiki/spaces/ENG/pages/902",
+                   status="IN REVIEW", asked_by="Roman", asked_at=now - 4 * h, updated_at=now - 4 * h, page="902"),
+        atl.Thread("jira:WEB-4962", "jira", "mention", "WEB-4962", "Rank tracker API returns null search volume", f"{site}/browse/WEB-4962", "WEB", "Resolved",
+                   "Tom", now - 2 * day, now - 1 * day, now - 1 * day, comments=[
+                       C("Tom", now - 2 * day, "@Jazi is the null on purpose?", mentions_me=True), C("you", now - 1 * day, "No: fixed in #512.", mine=True)], total=2),
+    ]
+    return atl.Cache(site, "demo", now - 6 * 60, {t.key: t for t in threads})
+
+
 def demo_disk() -> DiskInfo:
     return DiskInfo([DiskUsage("Disk", 95 << 30, 61 << 30, 30 << 30)], int(1.3 * (1 << 30)), 3 << 30)
 
@@ -5088,11 +5554,17 @@ def dump(width: int, height: int, demo: bool, view: str = "status") -> None:
     board.mode = view
     if demo:
         board.prs = demo_prs(board.now())
+        board.threads = demo_threads(board.now())
     elif view in PR_VIEWS:
         loader = PrLoader(board)
         loader.refresh()
+    elif view == "mentions":  # what the last run loaded: a dump does not go to the network for this
+        board.atl = atl.Config()
+        board.threads = atl.Cache.load() if atl.CACHE_PATH.exists() else None
     board.sel = board.flat()[1].id if len(board.flat()) > 1 else None
     board.pr_sel = board.pr_flat()[0].key if board.pr_flat() else None
+    board.thread_sel = board.thread_flat()[0].key if board.thread_flat() else None
+    board.thread_open = board.thread_sel
     lines, _ = compose(board, width, height, demo)
     print("\n".join(plain(l).rstrip() for l in lines))
 

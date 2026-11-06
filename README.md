@@ -127,6 +127,31 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 - A one-line strip under the title keeps the counts visible in every view. Refresh is every 15 minutes by default; change it (or set it to manual) in settings (`ctrl+s`), or press `ctrl+l`.
 - GitHub uses `gh`; GitLab uses `glab`. Lookups are **read-only**; only `a` (approve) and the sessions you start change anything.
 
+**Mentions** (optional). A fourth tab lists the Jira and Confluence threads that wait on you: someone asked you there after your last word. That is a comment that @mentions you (or an issue description that does), a reply under your own Confluence comment, or a Confluence decision record that names you as its *Approver* and is not decided yet. A thread where you never wrote counts from the first mention. The strip shows `@ 4 threads wait on you` in every view.
+
+```
+  Waiting on you  3
+▌ J  WEB-5149  Report management: cancel endpoint   asked                                       @Anna    2h
+              │ you · 4h
+              │   1. The insights service cannot cancel a running task, so I would not build this.
+              │ Anna · 2h
+              │   Agreed on the state map. @Jazi do I understand you correctly that we don't need Cancel
+              │ 5 comments · Blocked · o opens it in the browser
+  C  ADR-0010: where a refusal becomes an HTTP response   replied to you                       @Roman    3d
+    “Should we have details at all? You will only ever have one exception there.”
+
+  Asked to approve  1
+  C  DR #13: delete a post's photo when the post goes?   approver · IN REVIEW                  @Roman    4h
+
+  Answered by you  1   3 days after your reply they go
+  J  WEB-4962  Rank tracker API returns null search volume   you replied                         @Tom    1d
+```
+
+- `enter` shows the last comments under the row, `o` opens the thread in the browser.
+- `r` starts a background session (`Reply: WEB-5149`) that reads the thread and whatever it points to and **drafts** your reply; it never posts anything. It starts in the folder you set for the Jira project under *Reply folders* in settings (`BI=/srv/www/tools, FP=/srv/www/web`), else in your home folder. The prompt is a setting too. A ⟳ marks the thread while a session is on it, and `→` opens that session.
+- Your reply on Jira or Confluence moves the thread to *Answered by you*, where it stays 3 days. `d` marks a thread done (you answered on Slack or in person) and `z` snoozes it for a day; both last until someone asks you there again. The marks are kept in `meta.json`.
+- The first load looks back 7 days (*Mentions first load* in settings: 7, 14, 30 or 60). After that, each load asks only for what changed since the previous one, so a board that was closed for a week catches up on the whole week. Loads run every 15 minutes (*Mentions refresh*) and on `ctrl+l` in the tab.
+
 **Usage, limits and disk** (optional). The bottom of the screen can show your recent usage (turns, tokens, models, projects, from your local transcripts), your **5-hour and weekly rate limits** (account-wide) with a countdown to each reset, and a **Disk** row: how full the disk is, how much is free, and how much Claude Code's own data and your sessions' git worktrees take. The bar turns yellow below 15% free and red below 5%. If your projects live on another disk, each disk gets its own row.
 
 ## Pull requests: setup
@@ -135,6 +160,14 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 2. **GitHub** takes one request per refresh (`gh api graphql`): your open PRs, with their review decision, merge state, checks and stacks, and the open PRs that request your review, by name or through one of your teams (`review-requested:@me`). GitHub drops a team's request as soon as any member reviews, so the same request also reads the review-request history of your projects' open PRs (plus `gh api user/teams` for your teams): a PR asked of you or your team stays in the queue after a teammate approves it, until you review it yourself. Turn that off with *Team reviews* in settings (`ctrl+s`). New commits that dismiss your approval leave no review request either, so it also reads the open PRs you reviewed: one whose approval from you was dismissed comes back to the queue, to be approved again.
 3. **Review queue chips**: `re-requested` (asked again after you reviewed), `teammate-changes-requested` and `teammate-approved` (someone other than you and the author reviewed; bots such as Copilot do not count).
 4. **Review sessions** run `/code-review:code-review <urls>` by default (from the same marketplace: `/plugin install code-review@jazis-ai-marketplace`). Change the command, and the prompt used for GitLab merge requests, in `ctrl+s` if you use something else, for example the built-in `/code-review`.
+
+## Mentions: setup
+
+1. Create an API token at <https://id.atlassian.com/manage-profile/security/api-tokens>.
+2. In the board, `ctrl+s`: set *Atlassian site* (`acme`, `acme.atlassian.net` or any link to it), *Atlassian e-mail* and *Atlassian API token*. The token is never drawn on screen.
+3. They are saved to `~/.config/agent-board/atlassian.json`, readable only by you, not to `meta.json`.
+
+Each load is a few read-only REST calls with that token: one Jira search (`comment ~ "<your account id>" OR description ~ …`), then the comments of each issue it finds; four Confluence searches (comments that mention you, your own comments, new comments on pages you commented on, pages that mention you), then the comments of each page they touch. What was loaded is kept in `~/.cache/agent-board/mentions.json`; deleting it only makes the next load a first load again.
 
 ## Account limits: setup
 
@@ -166,7 +199,7 @@ sudo apt install wl-clipboard   # Wayland
 
 | Key | Does |
 |---|---|
-| `alt+←` `alt+→` · click a tab | switch between the Sessions, Review queue and My PRs tabs |
+| `alt+←` `alt+→` · click a tab | switch between the Sessions, Review queue, My PRs and Mentions tabs |
 | `ctrl+b` | group the sessions by status or by project; in the Review queue, by project or by ticket |
 | `↑` `↓` · click · double-click | select a session · select it · open it |
 | `home` `end` | jump to the first / last session (in the prompt they move the caret to the start / end of its row, then of the next / previous one) |
@@ -197,9 +230,9 @@ sudo apt install wl-clipboard   # Wayland
 It is a viewer plus a remote control, and it is careful about both:
 
 - **Reads**: `claude agents --json --all`, each job's `~/.claude/jobs/<id>/state.json`, your transcripts in `~/.claude/projects/` (usage numbers only), and `git remote` of your projects.
-- **Writes**: only its own files: `~/.config/agent-board/meta.json` (renames, tags, pins, settings) and, by the optional mod, `~/.cache/agent-board/limits.json`. It never edits Claude Code's files.
+- **Writes**: only its own files: `~/.config/agent-board/meta.json` (renames, tags, pins, settings), `~/.config/agent-board/atlassian.json` (the Atlassian login, mode 600), `~/.cache/agent-board/mentions.json` (loaded threads) and, by the optional mod, `~/.cache/agent-board/limits.json`. It never edits Claude Code's files.
 - **Runs** `claude attach`, `stop`, `rm`, `logs` and `--bg` when you ask, always after a confirmation for `stop`/`rm`.
-- Pull-request lookups are read-only `gh` / `glab` calls. Nothing is sent anywhere else.
+- Pull-request lookups are read-only `gh` / `glab` calls, and Mentions are read-only calls to your Atlassian site. Nothing is sent anywhere else, and the board never writes to Jira or Confluence.
 
 ## Configuration
 
@@ -210,6 +243,8 @@ Everything lives in the board (`ctrl+s`, `ctrl+g`, `ctrl+e`). For scripts and te
 | `AGENT_BOARD_CLAUDE` | `claude`: the Claude Code command |
 | `AGENT_BOARD_META` | `~/.config/agent-board/meta.json` |
 | `AGENT_BOARD_LIMITS` | `~/.cache/agent-board/limits.json` |
+| `AGENT_BOARD_ATLASSIAN` | `~/.config/agent-board/atlassian.json` |
+| `AGENT_BOARD_MENTIONS_CACHE` | `~/.cache/agent-board/mentions.json` |
 | `AGENT_BOARD_JOBS_DIR` | `~/.claude/jobs` |
 | `AGENT_BOARD_PROJECTS_DIR` | `~/.claude/projects` |
 

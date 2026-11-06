@@ -75,9 +75,11 @@ class Tabs(unittest.TestCase):
         b = board("status")
         keys(b, "alt+right")
         self.assertEqual(b.mode, "review")
-        keys(b, "alt+right", "alt+right")
+        keys(b, "alt+right")
         self.assertEqual(b.mode, "mine")
-        keys(b, "alt+left", "alt+left", "alt+left")
+        keys(b, "alt+right", "alt+right")
+        self.assertEqual(b.mode, "mentions")
+        keys(b, "alt+left", "alt+left", "alt+left", "alt+left")
         self.assertEqual(b.mode, "status")
 
     def test_alt_arrows_switch_tabs_from_the_prompt_too(self):
@@ -570,7 +572,9 @@ class Settings(unittest.TestCase):
         self.assertNotIn("review_command", self.b.meta.settings)
 
     def test_there_are_no_review_team_fields(self):
-        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews", "autofix", "dictate_record", "dictate_cmd"])
+        self.assertEqual([n for n, _ in self.b.settings_fields()], ["refresh", "pr_projects", "drafts", "age", "rereview", "review_cmd", "review_cmd_gl", "team_reviews", "autofix",
+                                                                       "atl_site", "atl_email", "atl_token", "mention_refresh", "first_load", "reply_folders", "reply_cmd",
+                                                                       "dictate_record", "dictate_cmd"])
 
 
     def test_settings_persist_across_restarts_and_do_not_disturb_old_files(self):
