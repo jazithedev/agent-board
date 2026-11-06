@@ -976,6 +976,32 @@ class LinksToEveryNamedPr(unittest.TestCase):
         self.assertTrue(b.linked_sessions(b.prs.review[0]))
 
 
+class LinksByTicket(unittest.TestCase):
+    """A session on a ticket links every PR of that ticket, even the ones it never named."""
+
+    def test_a_ticket_session_links_every_pr_of_the_ticket(self):
+        b = board("mine", mine=[mine(n, ticket="BI-5140") for n in (11, 12, 13)] + [mine(14, ticket="BI-9999"), mine(15)])
+        s = session(9)
+        s.auto_tags = ab.derive_tags("Enforce the ADR rules for BI-5140")
+        b.set_sessions([s])
+        self.assertEqual([bool(b.linked_sessions(p)) for p in b.prs.mine], [True, True, True, False, False])
+        self.assertIn("⟳", ab.plain(ab.pr_row(b, b.prs.mine[0], 0, 120, False)))
+
+    def test_only_in_the_same_project(self):
+        b = board("mine", mine=[mine(11, repo="acme/web-app", ticket="BI-5140")])
+        s = session(9)
+        s.auto_tags = ab.derive_tags("BI-5140")
+        b.set_sessions([s])
+        self.assertFalse(b.linked_sessions(b.prs.mine[0]))
+
+    def test_a_ticket_session_does_not_hold_back_the_conflict_fix(self):
+        b = board("mine", mine=[mine(11, ticket="BI-5140", merge="conflict", head_sha="abc")])
+        s = session(9)
+        s.auto_tags = ab.derive_tags("BI-5140")
+        b.set_sessions([s])
+        self.assertEqual([p.number for p in b.conflicts_to_fix()], [11])  # only a session on the PR itself counts there
+
+
 class TagMyPrs(unittest.TestCase):
     """ctrl+g in My PRs tags a pull request with any tag of yours, as in the Sessions view."""
 

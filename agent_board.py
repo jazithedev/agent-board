@@ -40,7 +40,7 @@ from typing import Callable, Optional
 import pullrequests as prs
 import slash
 
-__version__ = "0.33.1"
+__version__ = "0.34.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1178,7 +1178,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
     "mine": [
         ("↑ / ↓", "move between your pull requests"),
         ("alt+↑ / alt+↓", "jump between groups"),
-        ("enter / click", "jump to a session already on that PR (⟳), else open it in the browser"),
+        ("enter / click", "jump to a session on that PR or its ticket (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
         ("f", "fix conflicts: a background session merges the base into the branch, resolves them and pushes"),
         ("auto", "a PR with conflicts gets that session by itself on refresh, once per head commit; it is closed once its push clears them (Auto fix conflicts in ctrl+s)"),
@@ -1840,10 +1840,19 @@ class Board:
         path = (self.prs.repos.get(pr.repo_key) if self.prs else None) or ""
         return (os.path.basename(path.rstrip("/")) or pr.repo.split("/")[-1], path)
 
-    def linked_sessions(self, pr) -> list[Session]:
+    def linked_sessions(self, pr, by_ticket: bool = True) -> list[Session]:
+        """Sessions in the PR's project that name the PR, or (by_ticket) carry the ticket in its branch or title."""
         path = self.pr_project(pr)[1]
         label = f"PR #{pr.number}"
-        return [s for s in self.sessions if path and s.project_path == path and (pr.number in s.prs or any(t.kind == "pr" and t.label == label for t in s.auto_tags))]
+        ticket = f"Ticket: {pr.ticket}".upper() if by_ticket and getattr(pr, "ticket", "") else ""
+
+        def named(s: Session) -> bool:
+            return pr.number in s.prs or any(t.kind == "pr" and t.label == label for t in s.auto_tags)
+
+        def on_ticket(s: Session) -> bool:  # a ticket session opens several PRs and names only some of them
+            return bool(ticket) and any(t.kind == "ticket" and t.label.upper() == ticket for t in s.auto_tags)
+
+        return [s for s in self.sessions if path and s.project_path == path and (named(s) or on_ticket(s))]
 
     def _matches_pr(self, pr) -> bool:
         q = self.query.strip().lower()
@@ -1936,7 +1945,7 @@ class Board:
             return []
         done = self.meta.settings.get("conflicts_fixed") or {}
         return [p for p in self.prs.mine if p.merge == "conflict" and p.head_sha and done.get(p.key) != p.head_sha
-                and not any(s.group == "working" for s in self.linked_sessions(p))]
+                and not any(s.group == "working" for s in self.linked_sessions(p, by_ticket=False))]  # a ticket session may be busy elsewhere
 
     def remember_conflict_fix(self, pr) -> None:
         """One session per PR and head commit, also across restarts; PRs that are no longer yours or open are forgotten."""
@@ -2724,7 +2733,7 @@ def group_header(title: str, subtitle: str, count: int, width: int) -> Line:
 
 PR_FLAG_STYLE = {
     "conflicts": "chip_bad", "changes requested": "chip_bad", "checks failing": "chip_bad", "unresolved threads": "chip_warn",
-    "draft": "chip_info", "nobody asked": "chip_warn", "behind base": "chip_warn", "checks running": "chip_info",
+    "draft": "chip_info", "nobody asked": "chip_warn", "behind base": "chip_warn", "checks running": "chip_info", "approved": "chip_good",
     "re-requested": "chip_warn", "teammate-changes-requested": "chip_bad", "teammate-approved": "chip_good",
 }
 

@@ -62,6 +62,11 @@ class Classification(unittest.TestCase):
         self.assertNotIn("draft", mine(draft=True).notes)  # the Draft section already says so
         self.assertIn("behind base", mine(decision="approved", merge="behind").notes)
 
+    def test_an_approval_shows_when_something_else_needs_you(self):
+        self.assertIn("approved", mine(decision="approved", checks="fail").notes)  # Needs attention hides the approval otherwise
+        self.assertNotIn("approved", mine(decision="approved").notes)  # Ready to merge already says so
+        self.assertNotIn("approved", mine(checks="fail").notes)
+
 
 class Normalising(unittest.TestCase):
     def test_github_my_pr_node(self):

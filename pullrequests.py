@@ -128,6 +128,8 @@ class MyPr:
     @property
     def notes(self) -> list[str]:
         notes = []
+        if self.group == "attention" and self.decision == "approved":
+            notes.append("approved")  # else a failing check or conflict hides that reviewers already said yes
         if self.group == "ready" and self.merge == "behind":
             notes.append("behind base")
         if self.group == "waiting" and not self.requested and not self.reviewed:
