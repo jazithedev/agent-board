@@ -299,13 +299,26 @@ class MyPullRequests(unittest.TestCase):
 
     def test_strip_counts_what_needs_you(self):
         text = ab.plain(ab.Line(ab.strip_segs(self.b, 120)))
-        self.assertIn("⇣ 0 to review", text)
-        self.assertIn("2 of yours need you", text)
+        self.assertNotIn("to review", text)  # the count sits in the tab name
         self.assertIn("1 conflict", text)
         self.assertIn("1 changes", text)
         self.assertIn("1 CI failing", text)
         self.assertIn("✓ 1 ready to merge", text)
         self.assertIn("4m ago", text)
+
+    def test_tabs_carry_the_counts_and_hide_them_at_zero_or_unloaded(self):
+        head = lambda b: ab.plain(ab.compose(b, 130, 24)[0][1])
+        self.assertIn("My PRs (2)", head(self.b))
+        self.assertIn(" Review queue ", head(self.b))  # nothing to review: no number
+        b = board("status")
+        b.prs = None
+        self.assertIn(" My PRs ", head(b))
+        self.assertEqual([ab.tab_count(b, t) for t, _ in ab.TABS], [0, 0, 0, 0])
+
+    def test_clicking_a_tab_with_a_count_still_opens_it(self):
+        ab.compose(self.b, 130, 24)
+        mine_hit = next(h for h in self.b.tab_hit if h[3] == "mine")
+        self.assertEqual(mine_hit[3], "mine")
 
     def test_strip_before_any_data_and_when_a_source_failed(self):
         b = board("status")

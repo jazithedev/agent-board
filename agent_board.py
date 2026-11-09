@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.35.0"
+__version__ = "0.36.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -3149,15 +3149,16 @@ def mention_body(board: Board, width: int) -> tuple[list[Line], list[Optional[st
     return body, owners, sel_range
 
 
-def mention_segs(board: Board) -> list[Seg]:
-    """The Mentions part of the strip, once Jira and Confluence were loaded."""
-    if not board.threads:
-        return []
-    c = board.thread_counts()
-    n = c["waiting"] + c["approve"]
-    if not n:
-        return [("@ ", "strip"), ("0 threads", "strip"), ("    ", "normal")]
-    return [("@ ", "accent"), (str(n), "accent"), (f" thread{'s' if n != 1 else ''} wait on you", "accent"), ("    ", "normal")]  # right after the review count: it is cut last
+def tab_count(board: Board, tab: str) -> int:
+    """The number in a tab's name: what waits on you there. 0 also covers data not loaded yet, so the tab shows no number."""
+    if tab == "review":
+        return board.pr_counts()["review"]
+    if tab == "mine":
+        return board.pr_counts()["attention"]
+    if tab == "mentions" and board.threads:
+        c = board.thread_counts()
+        return c["waiting"] + c["approve"]
+    return 0
 
 
 def strip_segs(board: Board, width: int) -> list[Seg]:
@@ -3165,15 +3166,13 @@ def strip_segs(board: Board, width: int) -> list[Seg]:
     data = board.prs
     if data is None:
         text = "PRs: loading…" if board.pr_busy else "PRs: not loaded"
-        return [(" ", "normal"), (text, "strip"), ("    ", "normal")] + mention_segs(board)
+        return [(" ", "normal"), (text, "strip"), ("    ", "normal")]
     c = board.pr_counts()
-    segs: list[Seg] = [(" ", "normal")]
-    segs += [("⇣ ", "accent" if c["review"] else "strip"), (str(c["review"]), "accent" if c["review"] else "strip_bold"), (" to review", "accent" if c["review"] else "strip"), ("    ", "normal")]
-    segs += mention_segs(board)
+    segs: list[Seg] = [(" ", "normal")]  # the review and mention counts live in the tab names
     if c["attention"]:
         short = {"conflicts": "conflict", "changes requested": "changes", "checks failing": "CI failing", "unresolved threads": "threads"}
         why = " · ".join(f"{n} {short.get(r, r)}" for r, n in c["reasons"].items())
-        segs += [("⚑ ", "wait"), (str(c["attention"]), "wait"), (" of yours need you", "wait"), (f" ({why})" if why else "", "strip")]
+        segs += [("⚑ ", "wait"), (why or f"{c['attention']} of yours need you", "wait")]
     else:
         segs += [("⚑ ", "strip"), ("yours are all quiet", "strip")]
     if c["ready"]:
@@ -3312,8 +3311,12 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     summary = f"{counts['awaiting']} awaiting input · {counts['working']} working · " + (f"{counts['idle']} idle · " if counts["idle"] else "") + f"{counts['done']} completed"
     brand: list[Seg] = [(f" {APP_MARK} ", "accent"), (APP_NAME, "bold"), ("   ", "normal")]
     tabs: list[Seg] = []
+    names: dict[str, str] = {}  # drawn text -> tab, for the click map
     for i, (tab, label) in enumerate(TABS):
-        tabs += ([(" ", "normal")] if i else []) + [(f" {label} ", "tab_on" if tab == board.tab else "tab")]
+        n = tab_count(board, tab)
+        text = f" {label} ({n}) " if n else f" {label} "
+        names[text] = tab
+        tabs += ([(" ", "normal")] if i else []) + [(text, "tab_on" if tab == board.tab else "tab")]
     if demo:
         tabs.append(("  demo data", "wait"))
     if seg_width(brand) + seg_width(tabs) > inner:
@@ -3325,7 +3328,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     board.tab_hit, col = [], seg_width(brand)
     for text, style in tabs:
         if style in ("tab", "tab_on"):
-            board.tab_hit.append((1, col, col + cell_width(text), next(t for t, l in TABS if f" {l} " == text)))
+            board.tab_hit.append((1, col, col + cell_width(text), names[text]))
         col += cell_width(text)
     left = brand + tabs
     gap = max(1, inner - seg_width(left) - cell_width(summary))
