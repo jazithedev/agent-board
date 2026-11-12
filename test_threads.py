@@ -47,9 +47,9 @@ class Groups(unittest.TestCase):
 
     def test_the_screen_shows_the_groups_the_question_and_the_count_in_the_strip(self):
         text = screen(board(*defaults()))
-        for part in ("Waiting on you  2", "Asked to approve  1", "Answered by you  1", "BI-1", "replied to you", "“@Jazi a question from Anna?”", "@ 3 threads wait on you"):
+        for part in ("Waiting on you  2", "Asked to approve  1", "Answered by you  1", "BI-1", "replied to you", "“@Jazi a question from Anna?”"):
             self.assertIn(part, text)
-        self.assertIn(" Mentions ", text.split("\n")[1])
+        self.assertIn(" Mentions (3) ", text.split("\n")[1])
 
     def test_a_filter_narrows_the_threads(self):
         b = board(*defaults())

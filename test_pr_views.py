@@ -297,15 +297,48 @@ class MyPullRequests(unittest.TestCase):
         items = ab.order_stack([mine(10, merge="conflict"), mine(11, parent=10, depth=1, merge="clean")][1:])
         self.assertEqual([(p.number, d) for p, d in items], [(11, 0)])
 
-    def test_strip_counts_what_needs_you(self):
+    def test_strip_only_says_when_the_data_was_loaded(self):
         text = ab.plain(ab.Line(ab.strip_segs(self.b, 120)))
-        self.assertIn("⇣ 0 to review", text)
-        self.assertIn("2 of yours need you", text)
-        self.assertIn("1 conflict", text)
-        self.assertIn("1 changes", text)
-        self.assertIn("1 CI failing", text)
-        self.assertIn("✓ 1 ready to merge", text)
-        self.assertIn("4m ago", text)
+        self.assertIn("loaded 4m ago", text)
+        self.assertNotIn("conflict", text)  # the counts are in the title row
+
+    def numbers(self, b, tab):
+        return ab.tab_numbers(b, tab)
+
+    def test_my_prs_numbers_are_broken_waiting_ready_each_in_its_colour(self):
+        self.assertEqual(self.numbers(self.b, "mine"), [(2, "fail"), (1, "wait"), (1, "done")])  # a conflict and a failing CI are added together
+
+    def test_a_number_of_zero_is_not_shown_and_the_brackets_hide_when_all_are_zero(self):
+        b = board("review", mine=[mine(1, merge="conflict")])
+        self.assertEqual(self.numbers(b, "mine"), [(1, "fail")])
+        quiet = board("review", mine=[mine(1, decision="required", requested=("tom",))])
+        self.assertEqual(self.numbers(quiet, "mine"), [])
+
+    def test_the_title_row_has_only_numbers_in_brackets_and_no_words_beside_them(self):
+        text = ab.plain(ab.compose(self.b, 130, 24)[0][1])
+        self.assertIn("My PRs (2·1·1)", text)
+        self.assertIn("Sessions (", text)
+        for word in ("conflict", "ready", "awaiting", "working", "all quiet"):
+            self.assertNotIn(word, text)
+
+    def test_nothing_is_counted_before_the_pull_requests_load(self):
+        b = board("status")
+        b.prs = None
+        self.assertEqual([self.numbers(b, t) for t in ("review", "mine", "mentions")], [[], [], []])
+        self.assertIn(" My PRs ", ab.plain(ab.compose(b, 130, 24)[0][1]))
+
+    def test_every_number_gets_its_colour_in_the_drawn_row(self):
+        self.b.mode = "review"
+        row = ab.compose(self.b, 130, 24)[0][1]
+        pairs = [(t, s) for t, s in row.segs if t.isdigit()]
+        self.assertIn(("2", "fail"), pairs)
+        self.assertIn(("1", "done"), pairs)
+        self.assertIn(("2", "work"), pairs)  # the sessions: two working
+
+    def test_clicking_the_numbers_opens_their_tab(self):
+        ab.compose(self.b, 130, 24)
+        x0, x1 = next((a, b2) for _, a, b2, t in self.b.tab_hit if t == "mine")[:2]
+        self.assertGreater(x1 - x0, len(" My PRs "))  # the span reaches the brackets
 
     def test_strip_before_any_data_and_when_a_source_failed(self):
         b = board("status")
