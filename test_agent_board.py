@@ -663,8 +663,8 @@ class IdleSessions(unittest.TestCase):
 
     def test_the_sessions_numbers_are_awaiting_working_idle_done(self):
         b = board([make(1, "working", "a"), make(2, "working", "b", idle=True)])
-        self.assertEqual(ab.tab_numbers(b, "sessions"), [(0, "faint"), (1, "work"), (1, "dim"), (0, "faint")])
-        self.assertIn("Sessions (0·1·1·0)", ab.plain(ab.compose(b, 120, 20)[0][1]))
+        self.assertEqual(ab.tab_numbers(b, "sessions"), [(1, "work"), (1, "dim")])
+        self.assertIn("Sessions (1·1)", ab.plain(ab.compose(b, 120, 20)[0][1]))
 
     def test_the_idle_row_is_drawn_with_its_own_icon_and_age_since_it_stopped(self):
         s = make(2, "working", "quiet one", idle=True, updated=600)

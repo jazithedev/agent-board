@@ -308,9 +308,9 @@ class MyPullRequests(unittest.TestCase):
     def test_my_prs_numbers_are_conflicts_ci_changes_ready_each_in_its_colour(self):
         self.assertEqual(self.numbers(self.b, "mine"), [(1, "fail"), (1, "fail"), (1, "wait"), (1, "done")])
 
-    def test_a_number_of_zero_is_gray_and_the_brackets_hide_when_all_are_zero(self):
+    def test_a_number_of_zero_is_not_shown_and_the_brackets_hide_when_all_are_zero(self):
         b = board("review", mine=[mine(1, merge="conflict")])
-        self.assertEqual(self.numbers(b, "mine"), [(1, "fail"), (0, "faint"), (0, "faint"), (0, "faint")])
+        self.assertEqual(self.numbers(b, "mine"), [(1, "fail")])
         quiet = board("review", mine=[mine(1, decision="required", requested=("tom",))])
         self.assertEqual(self.numbers(quiet, "mine"), [])
 

@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.38.0"
+__version__ = "0.38.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1142,7 +1142,7 @@ class Effect:
 
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs, Mentions (a click on a tab works too)"),
-    ("(numbers)", "after a tab, in order. Sessions: awaiting · working · idle · done. Review queue: to review. My PRs: conflicts · CI failing · changes or threads · ready to merge. Mentions: waiting on you. Red broken, yellow waits on you, green good, gray none"),
+    ("(numbers)", "after a tab, in order. Sessions: awaiting · working · idle · done. Review queue: to review. My PRs: conflicts · CI failing · changes or threads · ready to merge. Mentions: waiting on you. A zero is not shown. Red broken, yellow waits on you, green good, orange working, gray idle"),
     ("ctrl+l", "refresh pull requests now (on the Mentions tab: load Jira and Confluence now)"),
     ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews, Atlassian login, dictation"),
 ]
@@ -3154,8 +3154,8 @@ PR_NUMBER_SLOTS = (("fail", {"conflicts"}), ("fail", {"checks failing"}), ("wait
 
 
 def tab_numbers(board: Board, tab: str) -> list[tuple[int, str]]:
-    """The numbers drawn in brackets after a tab's name, each with its colour: red broken, yellow waits on you, green good, gray none.
-    No words, so the order is fixed (see the README); [] hides the brackets when there is nothing to count or nothing loaded yet."""
+    """The numbers drawn in brackets after a tab's name, each with its colour: red broken, yellow waits on you, green good.
+    No words, so the order is fixed (see the README); a zero is left out, and [] hides the brackets when nothing is left or nothing is loaded yet."""
     if tab == "sessions":
         c = board.counts()
         nums = [(c["awaiting"], "wait"), (c["working"], "work"), (c["idle"], "dim"), (c["done"], "done")]
@@ -3169,7 +3169,7 @@ def tab_numbers(board: Board, tab: str) -> list[tuple[int, str]]:
         nums = [(c["waiting"] + c["approve"], "wait")]
     else:
         nums = []
-    return [(n, style if n else "faint") for n, style in nums] if any(n for n, _ in nums) else []
+    return [(n, style) for n, style in nums if n]  # a zero is not drawn, so the colour tells which number is which
 
 
 def strip_segs(board: Board, width: int) -> list[Seg]:
