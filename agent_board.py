@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.38.1"
+__version__ = "0.38.2"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1142,7 +1142,7 @@ class Effect:
 
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs, Mentions (a click on a tab works too)"),
-    ("(numbers)", "after a tab, in order. Sessions: awaiting · working · idle · done. Review queue: to review. My PRs: conflicts · CI failing · changes or threads · ready to merge. Mentions: waiting on you. A zero is not shown. Red broken, yellow waits on you, green good, orange working, gray idle"),
+    ("(numbers)", "after a tab, in order. Sessions: awaiting · working · idle · done. Review queue: to review. My PRs: conflicts + CI failing · changes + threads · ready to merge. Mentions: waiting on you. A zero is not shown. Red broken, yellow waits on you, green good, orange working, gray idle"),
     ("ctrl+l", "refresh pull requests now (on the Mentions tab: load Jira and Confluence now)"),
     ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews, Atlassian login, dictation"),
 ]
@@ -3150,7 +3150,7 @@ def mention_body(board: Board, width: int) -> tuple[list[Line], list[Optional[st
     return body, owners, sel_range
 
 
-PR_NUMBER_SLOTS = (("fail", {"conflicts"}), ("fail", {"checks failing"}), ("wait", {"changes requested", "unresolved threads"}))  # My PRs' numbers in order: colour and the reasons each counts (a PR with two of a slot's reasons counts once)
+PR_NUMBER_SLOTS = (("fail", ("conflicts", "checks failing")), ("wait", ("changes requested", "unresolved threads")))  # My PRs' numbers in order: colour and the reasons added together (a PR with two of them counts twice)
 
 
 def tab_numbers(board: Board, tab: str) -> list[tuple[int, str]]:
@@ -3162,8 +3162,8 @@ def tab_numbers(board: Board, tab: str) -> list[tuple[int, str]]:
     elif tab == "review":
         nums = [(board.pr_counts()["review"], "wait")] if board.prs is not None else []
     elif tab == "mine":
-        mine = [p for p in board.prs.mine if p.group == "attention"] if board.prs is not None else []
-        nums = [(sum(1 for p in mine if reasons & set(p.attention)), style) for style, reasons in PR_NUMBER_SLOTS] + [(board.pr_counts()["ready"], "done")] if board.prs is not None else []
+        c = board.pr_counts() if board.prs is not None else None
+        nums = [(sum(c["reasons"].get(r, 0) for r in reasons), style) for style, reasons in PR_NUMBER_SLOTS] + [(c["ready"], "done")] if c else []
     elif tab == "mentions" and board.threads:
         c = board.thread_counts()
         nums = [(c["waiting"] + c["approve"], "wait")]

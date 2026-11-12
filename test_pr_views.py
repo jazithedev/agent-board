@@ -305,8 +305,8 @@ class MyPullRequests(unittest.TestCase):
     def numbers(self, b, tab):
         return ab.tab_numbers(b, tab)
 
-    def test_my_prs_numbers_are_conflicts_ci_changes_ready_each_in_its_colour(self):
-        self.assertEqual(self.numbers(self.b, "mine"), [(1, "fail"), (1, "fail"), (1, "wait"), (1, "done")])
+    def test_my_prs_numbers_are_broken_waiting_ready_each_in_its_colour(self):
+        self.assertEqual(self.numbers(self.b, "mine"), [(2, "fail"), (1, "wait"), (1, "done")])  # a conflict and a failing CI are added together
 
     def test_a_number_of_zero_is_not_shown_and_the_brackets_hide_when_all_are_zero(self):
         b = board("review", mine=[mine(1, merge="conflict")])
@@ -316,7 +316,7 @@ class MyPullRequests(unittest.TestCase):
 
     def test_the_title_row_has_only_numbers_in_brackets_and_no_words_beside_them(self):
         text = ab.plain(ab.compose(self.b, 130, 24)[0][1])
-        self.assertIn("My PRs (1·1·1·1)", text)
+        self.assertIn("My PRs (2·1·1)", text)
         self.assertIn("Sessions (", text)
         for word in ("conflict", "ready", "awaiting", "working", "all quiet"):
             self.assertNotIn(word, text)
@@ -331,7 +331,7 @@ class MyPullRequests(unittest.TestCase):
         self.b.mode = "review"
         row = ab.compose(self.b, 130, 24)[0][1]
         pairs = [(t, s) for t, s in row.segs if t.isdigit()]
-        self.assertIn(("1", "fail"), pairs)
+        self.assertIn(("2", "fail"), pairs)
         self.assertIn(("1", "done"), pairs)
         self.assertIn(("2", "work"), pairs)  # the sessions: two working
 
