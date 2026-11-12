@@ -661,11 +661,10 @@ class IdleSessions(unittest.TestCase):
         self.assertEqual([g[0] for g in b.groups()], ["Working", "Idle", "Completed"])
         self.assertEqual(b.counts(), {"awaiting": 0, "working": 1, "idle": 1, "done": 1})
 
-    def test_the_summary_mentions_idle_only_when_there_is_one(self):
-        quiet = board([make(1, "working", "a")])
-        self.assertNotIn("idle", ab.plain(ab.compose(quiet, 120, 20)[0][1]))
+    def test_the_sessions_numbers_are_awaiting_working_idle_done(self):
         b = board([make(1, "working", "a"), make(2, "working", "b", idle=True)])
-        self.assertIn("1 idle", ab.plain(ab.compose(b, 120, 20)[0][1]))
+        self.assertEqual(ab.tab_numbers(b, "sessions"), [(0, "faint"), (1, "work"), (1, "dim"), (0, "faint")])
+        self.assertIn("Sessions (0·1·1·0)", ab.plain(ab.compose(b, 120, 20)[0][1]))
 
     def test_the_idle_row_is_drawn_with_its_own_icon_and_age_since_it_stopped(self):
         s = make(2, "working", "quiet one", idle=True, updated=600)

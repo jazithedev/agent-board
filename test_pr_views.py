@@ -302,39 +302,43 @@ class MyPullRequests(unittest.TestCase):
         self.assertIn("loaded 4m ago", text)
         self.assertNotIn("conflict", text)  # the counts are in the title row
 
-    def test_title_row_shows_every_count_in_its_colour(self):
-        self.b.mode = "review"  # another tab is selected, so My PRs shows its own colour
-        row = ab.compose(self.b, 160, 24)[0][1]
-        shown = {text.strip(): style for text, style in row.segs}
-        self.assertEqual(shown["1 conflict"], "fail")
-        self.assertEqual(shown["1 CI failing"], "fail")
-        self.assertEqual(shown["1 changes"], "wait")
-        self.assertEqual(shown["✓ 1 ready"], "done")
-        self.assertEqual(shown["(2)"], "fail")  # My PRs: something is broken
+    def numbers(self, b, tab):
+        return ab.tab_numbers(b, tab)
 
-    def test_title_row_says_all_quiet_in_gray_and_a_review_count_is_yellow(self):
-        b = board("review", mine=[mine(1, decision="required", requested=("tom",))])
-        row = ab.compose(b, 160, 24)[0][1]
-        self.assertEqual({t.strip(): s for t, s in row.segs}["all quiet"], "faint")
+    def test_my_prs_numbers_are_conflicts_ci_changes_ready_each_in_its_colour(self):
+        self.assertEqual(self.numbers(self.b, "mine"), [(1, "fail"), (1, "fail"), (1, "wait"), (1, "done")])
 
-    def test_a_narrow_title_row_drops_the_reasons_but_keeps_the_counts(self):
-        text = ab.plain(ab.compose(self.b, 95, 24)[0][1])
-        self.assertIn("My PRs (2)", text)
-        self.assertNotIn("conflict", text)
+    def test_a_number_of_zero_is_gray_and_the_brackets_hide_when_all_are_zero(self):
+        b = board("review", mine=[mine(1, merge="conflict")])
+        self.assertEqual(self.numbers(b, "mine"), [(1, "fail"), (0, "faint"), (0, "faint"), (0, "faint")])
+        quiet = board("review", mine=[mine(1, decision="required", requested=("tom",))])
+        self.assertEqual(self.numbers(quiet, "mine"), [])
 
-    def test_tabs_carry_the_counts_and_hide_them_at_zero_or_unloaded(self):
-        head = lambda b: ab.plain(ab.compose(b, 130, 24)[0][1])
-        self.assertIn("My PRs (2)", head(self.b))
-        self.assertIn(" Review queue ", head(self.b))  # nothing to review: no number
+    def test_the_title_row_has_only_numbers_in_brackets_and_no_words_beside_them(self):
+        text = ab.plain(ab.compose(self.b, 130, 24)[0][1])
+        self.assertIn("My PRs (1·1·1·1)", text)
+        self.assertIn("Sessions (", text)
+        for word in ("conflict", "ready", "awaiting", "working", "all quiet"):
+            self.assertNotIn(word, text)
+
+    def test_nothing_is_counted_before_the_pull_requests_load(self):
         b = board("status")
         b.prs = None
-        self.assertIn(" My PRs ", head(b))
-        self.assertEqual([ab.tab_count(b, t) for t, _ in ab.TABS], [0, 0, 0, 0])
+        self.assertEqual([self.numbers(b, t) for t in ("review", "mine", "mentions")], [[], [], []])
+        self.assertIn(" My PRs ", ab.plain(ab.compose(b, 130, 24)[0][1]))
 
-    def test_clicking_a_tab_with_a_count_still_opens_it(self):
+    def test_every_number_gets_its_colour_in_the_drawn_row(self):
+        self.b.mode = "review"
+        row = ab.compose(self.b, 130, 24)[0][1]
+        pairs = [(t, s) for t, s in row.segs if t.isdigit()]
+        self.assertIn(("1", "fail"), pairs)
+        self.assertIn(("1", "done"), pairs)
+        self.assertIn(("2", "work"), pairs)  # the sessions: two working
+
+    def test_clicking_the_numbers_opens_their_tab(self):
         ab.compose(self.b, 130, 24)
-        mine_hit = next(h for h in self.b.tab_hit if h[3] == "mine")
-        self.assertEqual(mine_hit[3], "mine")
+        x0, x1 = next((a, b2) for _, a, b2, t in self.b.tab_hit if t == "mine")[:2]
+        self.assertGreater(x1 - x0, len(" My PRs "))  # the span reaches the brackets
 
     def test_strip_before_any_data_and_when_a_source_failed(self):
         b = board("status")

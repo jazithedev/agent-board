@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.37.0"
+__version__ = "0.38.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1142,6 +1142,7 @@ class Effect:
 
 HELP_COMMON_END = [
     ("alt+← / alt+→", "the tab to the left / right: Sessions, Review queue, My PRs, Mentions (a click on a tab works too)"),
+    ("(numbers)", "after a tab, in order. Sessions: awaiting · working · idle · done. Review queue: to review. My PRs: conflicts · CI failing · changes or threads · ready to merge. Mentions: waiting on you. Red broken, yellow waits on you, green good, gray none"),
     ("ctrl+l", "refresh pull requests now (on the Mentions tab: load Jira and Confluence now)"),
     ("ctrl+s", "settings: PR refresh interval, PR projects, drafts, review queue age, auto re-review, review command, team reviews, Atlassian login, dictation"),
 ]
@@ -3149,40 +3150,26 @@ def mention_body(board: Board, width: int) -> tuple[list[Line], list[Optional[st
     return body, owners, sel_range
 
 
-def tab_count(board: Board, tab: str) -> int:
-    """The number in a tab's name: what waits on you there. 0 also covers data not loaded yet, so the tab shows no number."""
-    if tab == "review":
-        return board.pr_counts()["review"]
-    if tab == "mine":
-        return board.pr_counts()["attention"]
-    if tab == "mentions" and board.threads:
+PR_NUMBER_SLOTS = (("fail", {"conflicts"}), ("fail", {"checks failing"}), ("wait", {"changes requested", "unresolved threads"}))  # My PRs' numbers in order: colour and the reasons each counts (a PR with two of a slot's reasons counts once)
+
+
+def tab_numbers(board: Board, tab: str) -> list[tuple[int, str]]:
+    """The numbers drawn in brackets after a tab's name, each with its colour: red broken, yellow waits on you, green good, gray none.
+    No words, so the order is fixed (see the README); [] hides the brackets when there is nothing to count or nothing loaded yet."""
+    if tab == "sessions":
+        c = board.counts()
+        nums = [(c["awaiting"], "wait"), (c["working"], "work"), (c["idle"], "dim"), (c["done"], "done")]
+    elif tab == "review":
+        nums = [(board.pr_counts()["review"], "wait")] if board.prs is not None else []
+    elif tab == "mine":
+        mine = [p for p in board.prs.mine if p.group == "attention"] if board.prs is not None else []
+        nums = [(sum(1 for p in mine if reasons & set(p.attention)), style) for style, reasons in PR_NUMBER_SLOTS] + [(board.pr_counts()["ready"], "done")] if board.prs is not None else []
+    elif tab == "mentions" and board.threads:
         c = board.thread_counts()
-        return c["waiting"] + c["approve"]
-    return 0
-
-
-PR_REASON_BADGES = {"conflicts": ("conflict", "fail"), "checks failing": ("CI failing", "fail"), "changes requested": ("changes", "wait"), "unresolved threads": ("threads", "wait")}  # reason -> (short text, colour)
-
-
-def tab_count_style(board: Board, tab: str) -> str:
-    """Red when something of yours is broken (conflict, failing CI), yellow when it only waits on you."""
-    if tab == "mine" and any(PR_REASON_BADGES.get(r, ("", "wait"))[1] == "fail" for r in board.pr_counts()["reasons"]):
-        return "fail"
-    return "wait"
-
-
-def pr_badges(board: Board) -> list[Seg]:
-    """What is behind My PRs' count, drawn beside the tab: red conflicts / failing CI, yellow changes / threads, green ready to merge, gray when all is quiet."""
-    if board.prs is None:
-        return []
-    c = board.pr_counts()
-    segs: list[Seg] = []
-    for reason, n in c["reasons"].items():
-        text, style = PR_REASON_BADGES.get(reason, (reason, "wait"))
-        segs.append((f" {n} {text}", style))
-    if c["ready"]:
-        segs.append((f" ✓ {c['ready']} ready", "done"))
-    return segs or [(" all quiet", "faint")]
+        nums = [(c["waiting"] + c["approve"], "wait")]
+    else:
+        nums = []
+    return [(n, style if n else "faint") for n, style in nums] if any(n for n, _ in nums) else []
 
 
 def strip_segs(board: Board, width: int) -> list[Seg]:
@@ -3322,46 +3309,37 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
     """Returns the screen as styled lines and the caret position (y, x) if one should be shown."""
     lines: list[Line] = []
     inner = max(20, width - RIGHT_MARGIN)  # right-aligned content stops short of the terminal edge
-    counts = board.counts()
-    summary = f"{counts['awaiting']} awaiting input · {counts['working']} working · " + (f"{counts['idle']} idle · " if counts["idle"] else "") + f"{counts['done']} completed"
     brand: list[Seg] = [(f" {APP_MARK} ", "accent"), (APP_NAME, "bold"), ("   ", "normal")]
-    def build_tabs(detail: bool) -> tuple[list[Seg], list[tuple[int, int, str]]]:
-        """The tab row's segments and each tab's (first, end, name) span in cells; the counts, and with `detail` My PRs' reasons, sit beside the names."""
+
+    def build_tabs() -> tuple[list[Seg], list[tuple[int, int, str]]]:
+        """The tab row's segments and each tab's (first, end, name) span in cells; the numbers sit in brackets after the name, outside the highlight so their colours stay."""
         out: list[Seg] = []
         spans: list[tuple[int, int, str]] = []
         for i, (tab, label) in enumerate(TABS):
-            on = tab == board.tab
-            n = tab_count(board, tab)
             if i:
                 out.append((" ", "normal"))
             first = seg_width(out)
-            style = "tab_on" if on else "tab"
-            if n:
-                out += [(f" {label}", style), (f" ({n})", style if on else tab_count_style(board, tab)), (" ", style)]  # the selected tab keeps its one colour
-            else:
-                out.append((f" {label} ", style))
-            if detail and tab == "mine":
-                out += pr_badges(board) + [(" ", "normal")]  # the extra gap keeps the reasons from reading as Mentions'
+            out.append((f" {label} ", "tab_on" if tab == board.tab else "tab"))
+            nums = tab_numbers(board, tab)
+            if nums:
+                out.append(("(", "faint"))
+                for j, (n, style) in enumerate(nums):
+                    out += ([("·", "faint")] if j else []) + [(str(n), style)]
+                out.append((")", "faint"))
             spans.append((first, seg_width(out), tab))
         return out, spans
 
-    demo_seg: list[Seg] = [("  demo data", "wait")] if demo else []
-    short = f"{counts['awaiting']} awaiting · {counts['working']} working · " + (f"{counts['idle']} idle · " if counts["idle"] else "") + f"{counts['done']} done"
+    tabs, spans = build_tabs()
     mark = [(f" {APP_MARK} ", "accent")]
-    # What gives way on a narrow screen, first to last: the session summary (long, short, none), My PRs' reasons, the app name
-    for detail, name, text in [(True, True, summary), (True, True, short), (True, True, ""), (False, True, summary), (False, True, short), (False, True, ""), (False, False, "")]:
-        tabs, spans = build_tabs(detail)
-        tabs += demo_seg
-        head = brand if name else mark
-        if seg_width(head) + seg_width(tabs) + (1 + cell_width(text) if text else 0) <= inner:
-            break
-    brand, summary = head, text
+    if seg_width(brand) + seg_width(tabs) > inner:
+        brand = mark  # a narrow screen keeps the tabs and drops the name
+    summary = ""
     board.tab_hit = [(1, seg_width(brand) + x0, seg_width(brand) + x1, t) for x0, x1, t in spans]
     left = brand + tabs
     gap = max(1, inner - seg_width(left) - cell_width(summary))
     lines.append(Line([]))  # breathing room above the title
     lines.append(Line(left + [(" " * gap, "normal"), (summary, "dim")]))
-    strip = _ellipsize(strip_segs(board, inner), inner)
+    strip = _ellipsize(([(" demo data  ·", "wait")] if demo else []) + strip_segs(board, inner), inner)  # the demo label rides the status line: the title row is full of numbers
     lines.append(Line(strip + [("─" * max(0, width - seg_width(strip)), "rule")]))
     lines.append(Line([]))  # air between the strip and the first group
 
