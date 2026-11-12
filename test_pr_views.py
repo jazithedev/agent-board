@@ -297,14 +297,30 @@ class MyPullRequests(unittest.TestCase):
         items = ab.order_stack([mine(10, merge="conflict"), mine(11, parent=10, depth=1, merge="clean")][1:])
         self.assertEqual([(p.number, d) for p, d in items], [(11, 0)])
 
-    def test_strip_counts_what_needs_you(self):
+    def test_strip_only_says_when_the_data_was_loaded(self):
         text = ab.plain(ab.Line(ab.strip_segs(self.b, 120)))
-        self.assertNotIn("to review", text)  # the count sits in the tab name
-        self.assertIn("1 conflict", text)
-        self.assertIn("1 changes", text)
-        self.assertIn("1 CI failing", text)
-        self.assertIn("✓ 1 ready to merge", text)
-        self.assertIn("4m ago", text)
+        self.assertIn("loaded 4m ago", text)
+        self.assertNotIn("conflict", text)  # the counts are in the title row
+
+    def test_title_row_shows_every_count_in_its_colour(self):
+        self.b.mode = "review"  # another tab is selected, so My PRs shows its own colour
+        row = ab.compose(self.b, 160, 24)[0][1]
+        shown = {text.strip(): style for text, style in row.segs}
+        self.assertEqual(shown["1 conflict"], "fail")
+        self.assertEqual(shown["1 CI failing"], "fail")
+        self.assertEqual(shown["1 changes"], "wait")
+        self.assertEqual(shown["✓ 1 ready"], "done")
+        self.assertEqual(shown["(2)"], "fail")  # My PRs: something is broken
+
+    def test_title_row_says_all_quiet_in_gray_and_a_review_count_is_yellow(self):
+        b = board("review", mine=[mine(1, decision="required", requested=("tom",))])
+        row = ab.compose(b, 160, 24)[0][1]
+        self.assertEqual({t.strip(): s for t, s in row.segs}["all quiet"], "faint")
+
+    def test_a_narrow_title_row_drops_the_reasons_but_keeps_the_counts(self):
+        text = ab.plain(ab.compose(self.b, 95, 24)[0][1])
+        self.assertIn("My PRs (2)", text)
+        self.assertNotIn("conflict", text)
 
     def test_tabs_carry_the_counts_and_hide_them_at_zero_or_unloaded(self):
         head = lambda b: ab.plain(ab.compose(b, 130, 24)[0][1])

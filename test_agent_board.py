@@ -1282,7 +1282,7 @@ class Branding(unittest.TestCase):
         b.prs = ab.prs.PrData(fetched_at=NOW - 120)
         styles = {style for text, style in ab.strip_segs(b, 120) if text.strip()}
         self.assertNotIn("faint", styles)
-        self.assertTrue(styles & {"strip", "strip_bold", "accent", "wait", "done"})
+        self.assertTrue(styles & {"dim", "wait"})
 
     def test_total_height_is_unchanged_by_the_extra_row(self):
         for height in (12, 24, 40):
