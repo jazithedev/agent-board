@@ -81,7 +81,7 @@ its turn is shown as **Idle**, even when Claude Code's own state still says "wor
 
 - **Projects**: every session shows its project (worktrees fold into their repository); `ctrl+b` groups the list by project instead of by status, and the board remembers your choice.
 - **Tags**: `Code Review`, `Ticket: ABC-123`, `ADR: BE-0012` (an Architecture Decision Record: a zero-padded key such as `BE-0012` or `ADR-0020`), `DR: RM#1` (a Decision Record: `DR #1`, `RM DR#1`, `DR: LRT#2`) and `PR #42` are recognised from a session's text and its worktree, and stay once seen; a session merging a PR for you (`m` in My PRs) also shows `Merging: #42` first. Add your own from a picker (`ctrl+g`): create, rename and delete tags, and new sessions get suggested tags from your first prompt (editable rules).
-- **Rename, pin, stop, delete, peek** at a session's recent output, all from the keyboard.
+- **Rename, pin, stop, delete** a session, all from the keyboard.
 - **Start a session** by typing in the prompt at the bottom: choose its **project** (`ctrl+p`) and its **model** (`ctrl+e`). The project list holds every directory you have used Claude Code in, not only those with sessions; `ctrl+t` in it pins a project (any `/path` you type can be pinned too). Typing `@` in the prompt lists the same projects like `/` lists commands: `tab` completes `@name` and the session starts in that project. A mention that opens the prompt only picks the project and is not sent; inside a sentence ("add this skill to my @web-app") the name stays in the text.
 - **Slash commands**: type `/` for the list of commands and skills, as in `claude agents`. It filters as you type, `↑` `↓` choose, and `tab` or `enter` completes. Your own skills and commands, those of your installed plugins and the project's are read from disk; Claude Code's built-in commands are a snapshot (2.1.296), and anything else you can still type by hand.
 - **Open a session** with Enter, → or a double-click. Coming back to the board is instant: no flash of your normal terminal.
@@ -208,7 +208,6 @@ sudo apt install wl-clipboard   # Wayland
 | `/` | list slash commands and skills: `↑` `↓` choose, `tab` or `enter` completes |
 | `ctrl+n` | dictate into the prompt: press to record, press again to stop ([setup](#dictation)) |
 | `ctrl+p` · `ctrl+e` | choose the project · the model for new sessions |
-| `space` | peek at a session's recent output |
 | `ctrl+r` · `ctrl+g` · `ctrl+t` | rename (in the session's own row, the old name selected so typing replaces it) · tags · pin |
 | `ctrl+x` | stop (working or idle) or delete (finished): asks first, `x` or `ctrl+x` again confirms |
 | `ctrl+f` | find |

@@ -347,23 +347,21 @@ class Wrapping(unittest.TestCase):
     def test_an_unbreakable_word_is_still_broken_to_fit(self):
         self.assertTrue(all(len(l) <= 12 for l in ab.wrap_lines(["x" * 40], 12)))
 
-    def test_an_error_popup_shows_all_of_a_long_message_at_every_width_while_a_log_peek_still_truncates(self):
+    def test_an_error_popup_shows_all_of_a_long_message_at_every_width(self):
         long = "Couldn't wake abc — Workspace not trusted. Run `claude` in /some/long/folder once and accept the trust prompt, then retry."
         for width in (60, 80, 120):
             b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/x", now=lambda: NOW)
-            b.peek = {"title": "could not open s", "lines": [long], "top": 0, "wrap": True}
+            b.popup = {"title": "could not open s", "lines": [long], "top": 0}
             text = " ".join(ab.plain(l).replace("│", " ") for l in ab.compose(b, width, 24)[0])
             self.assertIn("then retry.", " ".join(text.split()), width)
             for line in ab.compose(b, width, 24)[0]:
                 self.assertLessEqual(ab.seg_width(line.segs), width)
-        b.peek = {"title": "output", "lines": [long], "top": 0}  # a log: no wrap flag
-        self.assertIn("…", "\n".join(ab.plain(l) for l in ab.compose(b, 60, 24)[0]))
 
     def test_the_popup_closes_with_any_key_and_the_board_is_usable_afterwards(self):
         b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/x", now=lambda: NOW)
-        b.peek = {"title": "t", "lines": ["x"], "top": 0, "wrap": True}
+        b.popup = {"title": "t", "lines": ["x"], "top": 0}
         b.handle("esc")
-        self.assertIsNone(b.peek)
+        self.assertIsNone(b.popup)
 
 
 class WhatMayBeKilled(unittest.TestCase):

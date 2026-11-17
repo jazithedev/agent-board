@@ -146,8 +146,8 @@ class KeysOnABusyRow(unittest.TestCase):
         self.b.sel = "id2"
         self.b.busy["id2"] = "removing…"
 
-    def test_it_cannot_be_opened_peeked_or_asked_about_again(self):
-        for key in ("enter", "right", "space", "ctrl+x"):
+    def test_it_cannot_be_opened_or_asked_about_again(self):
+        for key in ("enter", "right", "ctrl+x"):
             self.b.msg = ""
             self.assertIsNone(self.b.handle(key), key)
             self.assertIn("is removing…", self.b.msg, key)

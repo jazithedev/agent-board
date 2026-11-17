@@ -234,9 +234,8 @@ class DraftAndSessions(unittest.TestCase):
         self.assertEqual(self.b.handle("enter"), ab.Effect("attach", session_id="id1"))
         self.assertEqual(self.b.input, "half-written task")
 
-    def test_right_arrow_and_space_also_act_on_the_selected_session(self):
+    def test_right_arrow_also_opens_the_selected_session(self):
         self.assertEqual(self.b.handle("right"), ab.Effect("attach", session_id="id1"))
-        self.assertEqual(self.b.handle("space"), ab.Effect("peek", session_id="id1"))
         self.assertEqual(self.b.input, "half-written task")
 
     def test_alt_number_opens_a_session_with_a_draft_too(self):
@@ -315,7 +314,7 @@ class CtrlC(unittest.TestCase):
             self.assertIsNone(getattr(b, attr))
             self.assertEqual(b.input, "draft")
 
-    def test_confirmation_help_and_peek_are_dismissed_not_confirmed(self):
+    def test_confirmation_and_help_are_dismissed_not_confirmed(self):
         b = board()
         b.handle("down")
         b.handle("ctrl+x")

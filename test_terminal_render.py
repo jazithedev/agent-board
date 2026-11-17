@@ -1,12 +1,7 @@
-import tempfile
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 import agent_board as ab
 
-NOW = 1_800_000_000.0
 CSI = "\x1b["
 
 
@@ -44,24 +39,6 @@ class RenderTerminal(unittest.TestCase):
     def test_wide_characters_take_two_columns(self):
         out = f"日本\r{CSI}4Gx"  # column 4 is the right half of 本
         self.assertEqual(ab.render_terminal(out), ["日 x"])
-
-
-class Peek(unittest.TestCase):
-    def test_space_shows_the_last_screen_not_every_repaint(self):
-        b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/srv/www/p", now=lambda: NOW)
-        b.set_sessions([ab.Session(id="id1", name="alpha", state="working", project="p", project_path="/srv/www/p",
-                                   started_at=NOW - 60, updated_at=NOW - 60)])
-        raw = f"{CSI}2J{CSI}H● Done.\r{CSI}2B✶ Discombobulating…\r✻ Crunched for 47s{CSI}K".encode()
-        calls = []
-
-        def cli(args, cwd=None, timeout=60, text=True):
-            calls.append((args, text))
-            return SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
-
-        with mock.patch.object(ab, "run_cli", cli):
-            ab.perform(None, b, ab.Effect("peek", session_id="id1"), None)
-        self.assertEqual(calls, [(["logs", "id1"], False)])  # bytes, so each \r stays a carriage return
-        self.assertEqual(b.peek["lines"], ["● Done.", "", "✻ Crunched for 47s"])
 
 
 if __name__ == "__main__":

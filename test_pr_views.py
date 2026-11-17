@@ -1240,7 +1240,7 @@ class ContextualHelp(unittest.TestCase):
 
     def test_session_views_list_session_and_prompt_shortcuts_only(self):
         text = self.text("status")
-        for needle in ("rename the session", "peek at", "pin the session", "start a new background session", "choose the model"):
+        for needle in ("rename the session", "pin the session", "start a new background session", "choose the model"):
             self.assertIn(needle, text)
         for foreign in ("mark / unmark", "review the marked", "pull request in the browser"):
             self.assertNotIn(foreign, text)
@@ -1249,13 +1249,13 @@ class ContextualHelp(unittest.TestCase):
         text = self.text("review")
         for needle in ("mark / unmark", "review the marked", "ctrl+a", "open the pull request in the browser"):
             self.assertIn(needle, text)
-        for foreign in ("rename the session", "peek at", "pin the session", "choose the model", "new background session", "clipboard"):
+        for foreign in ("rename the session", "pin the session", "choose the model", "new background session", "clipboard"):
             self.assertNotIn(foreign, text)
 
     def test_my_pull_requests_has_no_marking_reviewing_or_session_actions(self):
         text = self.text("mine")
         self.assertIn("open the pull request in the browser", text)
-        for foreign in ("mark", "review the marked", "rename", "peek", "pin", "choose the model", "clipboard"):
+        for foreign in ("mark", "review the marked", "rename", "pin", "choose the model", "clipboard"):
             self.assertNotIn(foreign, text)
 
     def test_status_and_project_views_share_the_session_list(self):

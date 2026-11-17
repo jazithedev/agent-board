@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.38.3"
+__version__ = "0.39.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1085,7 +1085,7 @@ TERM_TOKEN_RE = re.compile(
 def render_terminal(text: str) -> list[str]:
     """What a terminal shows after receiving `text`, as plain lines.
 
-    `claude logs` and an attach capture are raw terminal output: a TUI repaints its spinner and status in place
+    An attach capture is raw terminal output: a TUI repaints its spinner and status in place
     with cursor moves. Deleting the escapes would leave every repaint on a line of its own, so they are applied
     to a grid instead. The screen has no fixed size here, and a line feed also returns to column 0, so plain
     text without \\r still reads as written."""
@@ -1241,7 +1241,7 @@ DEFAULT_DICTATE_COMMAND = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(
 
 @dataclass
 class Effect:
-    kind: str  # attach | quit | dispatch | stop | remove | peek | dictate_start | dictate_stop
+    kind: str  # attach | quit | dispatch | stop | remove | dictate_start | dictate_stop
     session_id: str = ""
     prompt: str = ""
     cwd: str = ""
@@ -1267,7 +1267,6 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("alt+↑ / alt+↓", "jump between groups"),
         ("alt+1 … alt+6", "open the Nth visible session"),
         ("enter / → / double-click", "open the selected session (a draft in the prompt is kept)"),
-        ("space", "peek at the session's recent output"),
         ("ctrl+r", "rename the session right in its row, typing replaces the selected old name (kept by the board only)"),
         ("ctrl+g", "tags: pick, create, rename, delete (ctrl+r / ctrl+x inside)"),
         ("ctrl+t", "pin the session to the top"),
@@ -1393,7 +1392,7 @@ class Board:
         self.scroll = 0
         self.msg = ""
         self.help = False
-        self.peek: Optional[dict] = None  # {'title': str, 'lines': [str], 'top': int}
+        self.popup: Optional[dict] = None  # why a session could not be opened: {'title': str, 'lines': [str], 'top': int}
         self.target_path: Optional[str] = None
         self.picker: Optional[dict] = None  # {'text': str, 'idx': int}
         self.modelpicker: Optional[dict] = None  # {'text': str, 'idx': int}
@@ -1838,7 +1837,7 @@ class Board:
     def _lists_blocked(self) -> bool:
         """The slash and @ lists belong to the prompt: they stay shut while anything else has the focus."""
         blocked = self.sel is not None or self.mode in TAB_VIEWS or self.edit or self.picker or self.modelpicker or self.tagpicker
-        return bool(blocked or self.settingsui or self.confirm or self.help or self.peek)
+        return bool(blocked or self.settingsui or self.confirm or self.help or self.popup)
 
     def _trailing_word(self, sign: str) -> Optional[str]:
         """The word being typed at the caret when it starts with `sign`: `/cod` in "Create a mod /cod". None once a space follows it."""
@@ -2605,7 +2604,7 @@ class Board:
             return None
         if key == "ctrl+c":
             # never leaves the board (esc does): it cancels whatever is open, else clears the prompt
-            modal = self.confirm or self.help or self.peek or self.picker or self.modelpicker or self.tagpicker or self.settingsui or self.edit
+            modal = self.confirm or self.help or self.popup or self.picker or self.modelpicker or self.tagpicker or self.settingsui or self.edit
             if modal:
                 return self.handle("esc")
             if self.input and self.mode not in TAB_VIEWS:
@@ -2629,8 +2628,8 @@ class Board:
             return self._handle_modelpicker(key, ch)
         if self.tagpicker:
             return self._handle_tagpicker(key, ch)
-        if self.peek:
-            return self._handle_peek(key)
+        if self.popup:
+            return self._handle_popup(key)
         if self.edit:
             return self._handle_edit(key, ch)
         return self._handle_main(key, ch)
@@ -2787,7 +2786,7 @@ class Board:
         text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
         text = "".join(c for c in text if c == "\n" or c >= " ")[:500000]
         flat = " ".join(text.split())
-        if self.confirm or self.help or self.peek:
+        if self.confirm or self.help or self.popup:
             return None
         if self.settingsui:
             if self.settingsui["edit"] is not None:
@@ -2854,14 +2853,14 @@ class Board:
         self.msg = "cancelled"
         return None
 
-    def _handle_peek(self, key: str) -> None:
-        p = self.peek
+    def _handle_popup(self, key: str) -> None:
+        p = self.popup
         if key == "up":
             p["top"] = max(0, p["top"] - 1)
         elif key == "down":
             p["top"] += 1
         elif key in ("esc", "space", "enter", "left") or key == "char":
-            self.peek = None
+            self.popup = None
         return None
 
     def _handle_edit(self, key: str, ch: str) -> Optional[Effect]:
@@ -2943,7 +2942,7 @@ class Board:
             n = int(key[4:]) - 1
             if 0 <= n < len(flat) and flat[n].id not in self.busy:
                 return Effect("attach", session_id=flat[n].id)
-        elif key in ("enter", "right", "space", "ctrl+x") and s and s.id in self.busy:
+        elif key in ("enter", "right", "ctrl+x") and s and s.id in self.busy:
             self.msg = f"“{self.name_of(s)}” is {self.busy[s.id]}"
         elif key == "enter":
             if s:  # a selected session has the focus, whatever draft is waiting in the prompt
@@ -2960,8 +2959,6 @@ class Board:
                 return Effect("dispatch", prompt=prompt, cwd=cwd, tags=tags, model=self.model())
         elif key == "right" and s:
             return Effect("attach", session_id=s.id)
-        elif key == "space" and s:
-            return Effect("peek", session_id=s.id)
         elif key in ("ctrl+x", "ctrl+y") and not s and self.input:
             text = self.prompt_text()
             if key == "ctrl+x":
@@ -3493,7 +3490,7 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         body = [Line([]), Line([("   No sessions" + (" match your search" if board.query else " yet — type a task below"), "faint")])]
     # The LIMITS block, and the USAGE panel above it, are pinned under the list; a long list scrolls in the rows left above them
     panels: list[Line] = []
-    if not (board.help or board.peek or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
+    if not (board.help or board.popup or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
         limits_block = limits_panel(board.limits, inner, board.now(), board.disk)
         if body_h - len(limits_block) - 1 >= min(len(body), LIST_ROWS_BESIDE_LIMITS):
             panels = limits_block
@@ -3533,8 +3530,8 @@ def compose(board: Board, width: int, height: int, demo: bool = False) -> tuple[
         _overlay_tagpicker(board, lines, width)
     if board.settingsui:
         _overlay_settings(board, lines, width)
-    if board.peek:
-        _overlay_peek(board, lines, width)
+    if board.popup:
+        _overlay_popup(board, lines, width)
 
     if board.slash_query() is not None:
         matches, chosen = board.slash_view()
@@ -3619,7 +3616,7 @@ def prompt_area(board: Board, width: int, inner: int, max_rows: int) -> tuple[li
             lead = pre if r == 0 else [("   ", "normal")]
         tail = [(" " * max(1, inner - seg_width(lead) - seg_width(body_segs) - seg_width(right)), "normal")] + right if r == 0 else []
         lines.append(Line(lead + body_segs + tail))
-    if board.sel is None and not (board.help or board.peek or board.confirm or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
+    if board.sel is None and not (board.help or board.popup or board.confirm or board.picker or board.modelpicker or board.tagpicker or board.settingsui):
         caret = (caret_row, seg_width(pre) + caret_col)
     return lines, caret, hit
 
@@ -3902,7 +3899,7 @@ def _hint_segs(board: Board) -> list[Seg]:
             "find": "type to filter · enter keep · esc clear",
             "rename": "enter save · esc cancel · empty resets the name",
         }[board.edit["kind"]]
-    elif board.peek:
+    elif board.popup:
         hint = "↑/↓ scroll · esc close"
     elif board.settingsui:
         hint = "enter save · esc cancel" if board.settingsui["edit"] else "↑/↓ move · ←/→ change · enter edit/toggle · esc close"
@@ -3927,7 +3924,7 @@ def _hint_segs(board: Board) -> list[Seg]:
     elif board.sel:
         s = board.selected()
         stop = "stop" if s and s.group == "working" else "delete"
-        hint = ("draft kept · " if board.input else "") + f"enter open · space peek · ctrl+r rename · ctrl+g tags · ctrl+t pin · ctrl+x {stop} · ? shortcuts"
+        hint = ("draft kept · " if board.input else "") + f"enter open · ctrl+r rename · ctrl+g tags · ctrl+t pin · ctrl+x {stop} · ? shortcuts"
     elif board.slash_query() is not None and board.slash_view()[0]:
         n = len(board.slash_view()[0])
         hint = f"↑/↓ choose · tab or enter completes · esc clears · {n} command{'s' if n != 1 else ''}"
@@ -4065,11 +4062,11 @@ def wrap_lines(lines: list[str], width: int) -> list[str]:
     return out
 
 
-def _overlay_peek(board: Board, lines: list[Line], width: int) -> None:
-    p = board.peek
+def _overlay_popup(board: Board, lines: list[Line], width: int) -> None:
+    p = board.popup
     body_h = len(lines) - HEADER_ROWS - 2
     inner = width - 6
-    source = wrap_lines(p["lines"], inner) if p.get("wrap") else p["lines"]  # error text wraps; logs keep their own layout
+    source = wrap_lines(p["lines"], inner)
     p["top"] = max(0, min(p["top"], max(0, len(source) - body_h)))
     shown = source[p["top"] : p["top"] + body_h]
     rows = [[(" " + fit(l, inner), "normal")] for l in shown]
@@ -4128,7 +4125,7 @@ def _bit(name: str, fallback: int = 0) -> int:
 
 def mouse_event(sel: Selection, board: Board, y: int, x: int, bstate: int, lines: list[str]) -> Optional[str]:
     """Applies one mouse event; returns text that should be copied to the clipboard, if any."""
-    modal = bool(board.settingsui or board.picker or board.modelpicker or board.tagpicker or board.help or board.peek or board.edit or board.confirm)
+    modal = bool(board.settingsui or board.picker or board.modelpicker or board.tagpicker or board.help or board.popup or board.edit or board.confirm)
     if bstate & _bit("BUTTON4_PRESSED", 0x10000):
         if not modal:
             board.wheel = True
@@ -4922,8 +4919,8 @@ def start_reply_session(board: Board, t: atl.Thread) -> None:
     board.set_sessions(load_sessions())
 
 
-def run_cli(args: list[str], cwd: Optional[str] = None, timeout: int = 60, text: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run([CLAUDE, *args], capture_output=True, text=text, cwd=cwd, timeout=timeout)
+def run_cli(args: list[str], cwd: Optional[str] = None, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run([CLAUDE, *args], capture_output=True, text=True, cwd=cwd, timeout=timeout)
 
 
 def open_url(url: str) -> str:
@@ -5430,15 +5427,10 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         notice = attach_failure_notice(result, board.name_of(opened) if opened else effect.session_id) if result else None
         if notice:
             board.msg = notice[0]
-            board.peek = {"title": f"could not open {board.name_of(opened) if opened else effect.session_id}", "lines": notice[1], "top": 0, "wrap": True}
+            board.popup = {"title": f"could not open {board.name_of(opened) if opened else effect.session_id}", "lines": notice[1], "top": 0}
         return True
     try:
-        if effect.kind == "peek":
-            # bytes: text mode would turn each \r of a repaint into a new line
-            lines = render_terminal(run_cli(["logs", effect.session_id], text=False).stdout.decode(errors="replace"))
-            s = next((x for x in board.sessions if x.id == effect.session_id), None)
-            board.peek = {"title": f"output · {board.name_of(s) if s else effect.session_id}", "lines": lines, "top": 10**6}
-        elif effect.kind in ("stop", "remove"):
+        if effect.kind in ("stop", "remove"):
             start_session_action(board, effect)
         elif effect.kind == "dispatch":
             start_dispatch(board, effect)
