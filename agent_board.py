@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.38.2"
+__version__ = "0.38.3"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -54,7 +54,6 @@ META_PATH = Path(
 REFRESH_SECONDS = 5.0  # each refresh starts Claude Code once (~0.3 s of CPU); every 2 s cost a tenth of a core
 SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
 WAITING_MARK = "⧗"  # a working session whose turn is over, waiting on a background task it started
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]")
 
 # ───────────────────────────── tags ─────────────────────────────
 
@@ -1072,6 +1071,120 @@ def cell_width(text: str) -> int:
             continue
         total += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
     return total
+
+
+TERM_TOKEN_RE = re.compile(
+    r"\x1b\[([0-9;?<>=]*)[ -/]*([@-~])"  # CSI: cursor moves, clears, colours
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: titles, links
+    r"|\x1b[()][A-Z0-9]|\x1b.?"  # charsets, save/restore cursor and other two-byte escapes
+    r"|[\x00-\x1f\x7f]"
+    r"|[^\x00-\x1f\x7f\x1b]+"
+)
+
+
+def render_terminal(text: str) -> list[str]:
+    """What a terminal shows after receiving `text`, as plain lines.
+
+    `claude logs` and an attach capture are raw terminal output: a TUI repaints its spinner and status in place
+    with cursor moves. Deleting the escapes would leave every repaint on a line of its own, so they are applied
+    to a grid instead. The screen has no fixed size here, and a line feed also returns to column 0, so plain
+    text without \\r still reads as written."""
+    grid: list[list[str]] = [[]]
+    row = col = 0
+    saved = (0, 0)
+
+    def put(ch: str) -> None:
+        nonlocal col
+        line = grid[row]
+        w = 0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w == 0:
+            if col and line:
+                line[col - 1] += ch  # a combining mark joins the character before it
+            return
+        if len(line) < col + w:
+            line.extend(" " * (col + w - len(line)))
+        if line[col] == "":  # overwriting the right half of a wide character blanks its left half
+            line[col - 1] = " "
+        if col + w < len(line) and line[col + w] == "":
+            line[col + w] = " "  # and overwriting its left half blanks the right one
+        line[col] = ch
+        if w == 2:
+            line[col + 1] = ""  # placeholder: the wide character covers this cell
+        col += w
+
+    def goto(r: int, c: int) -> None:
+        nonlocal row, col
+        row, col = max(0, r), max(0, c)
+        while len(grid) <= row:
+            grid.append([])
+
+    for m in TERM_TOKEN_RE.finditer(text):
+        tok = m.group(0)
+        if m.group(2):
+            params, final = m.group(1), m.group(2)
+            if params.startswith(("?", "<", ">", "=")):
+                continue  # private modes: alternate screen, mouse, cursor visibility
+            nums = [int(p) if p.isdigit() else 0 for p in params.split(";")] if params else []
+            n = max(1, nums[0]) if nums else 1
+            if final == "A":
+                goto(row - n, col)
+            elif final in ("B", "e"):
+                goto(row + n, col)
+            elif final in ("C", "a"):
+                goto(row, col + n)
+            elif final == "D":
+                goto(row, col - n)
+            elif final == "E":
+                goto(row + n, 0)
+            elif final == "F":
+                goto(row - n, 0)
+            elif final in ("G", "`"):
+                goto(row, n - 1)
+            elif final == "d":
+                goto(n - 1, col)
+            elif final in ("H", "f"):
+                goto(n - 1, (max(1, nums[1]) if len(nums) > 1 else 1) - 1)
+            elif final == "J":
+                mode = nums[0] if nums else 0
+                if mode in (2, 3):
+                    grid = [[] for _ in range(row + 1)]  # a cleared screen keeps no history: show only what came after
+                elif mode == 0:
+                    del grid[row][col:]
+                    del grid[row + 1:]
+                elif mode == 1:
+                    grid[:row] = [[] for _ in range(row)]
+                    grid[row][:col + 1] = [" "] * min(col + 1, len(grid[row]))
+            elif final == "K":
+                mode = nums[0] if nums else 0
+                line = grid[row]
+                if mode == 0:
+                    del line[col:]
+                elif mode == 1:
+                    line[:col + 1] = [" "] * min(col + 1, len(line))
+                else:
+                    line.clear()
+            continue  # colours (m) and everything else change no text
+        if tok == "\x1b7":
+            saved = (row, col)
+        elif tok == "\x1b8":
+            goto(*saved)
+        elif tok[0] == "\x1b":
+            continue
+        elif tok == "\n":
+            goto(row + 1, 0)
+        elif tok == "\r":
+            col = 0
+        elif tok == "\b":
+            col = max(0, col - 1)
+        elif tok == "\t":
+            goto(row, (col // 8 + 1) * 8)
+        elif tok[0] >= " " and tok != "\x7f":
+            for ch in tok:
+                put(ch)
+    lines = ["".join(line).rstrip() for line in grid]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
 
 
 def fit(text: str, width: int) -> str:
@@ -4335,7 +4448,7 @@ def attach_session(claude: str, session_id: str, poll: float = 0.03, scan_every:
             proc.kill()
             proc.wait()
             killed = True
-    text = ANSI_RE.sub("", captured.decode(errors="replace")).replace("\r", "")
+    text = "\n".join(render_terminal(captured.decode(errors="replace")))
     return AttachResult(cut=cut, returncode=proc.returncode, output=text, killed=killed)
 
 
@@ -4809,8 +4922,8 @@ def start_reply_session(board: Board, t: atl.Thread) -> None:
     board.set_sessions(load_sessions())
 
 
-def run_cli(args: list[str], cwd: Optional[str] = None, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run([CLAUDE, *args], capture_output=True, text=True, cwd=cwd, timeout=timeout)
+def run_cli(args: list[str], cwd: Optional[str] = None, timeout: int = 60, text: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run([CLAUDE, *args], capture_output=True, text=text, cwd=cwd, timeout=timeout)
 
 
 def open_url(url: str) -> str:
@@ -5321,8 +5434,8 @@ def perform(scr, board: Board, effect: Effect, loader: Loader) -> bool:
         return True
     try:
         if effect.kind == "peek":
-            out = run_cli(["logs", effect.session_id]).stdout
-            lines = ANSI_RE.sub("", out).replace("\r", "").split("\n")
+            # bytes: text mode would turn each \r of a repaint into a new line
+            lines = render_terminal(run_cli(["logs", effect.session_id], text=False).stdout.decode(errors="replace"))
             s = next((x for x in board.sessions if x.id == effect.session_id), None)
             board.peek = {"title": f"output · {board.name_of(s) if s else effect.session_id}", "lines": lines, "top": 10**6}
         elif effect.kind in ("stop", "remove"):
