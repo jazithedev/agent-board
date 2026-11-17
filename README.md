@@ -201,7 +201,7 @@ sudo apt install wl-clipboard   # Wayland
 |---|---|
 | `alt+←` `alt+→` · click a tab | switch between the Sessions, Review queue, My PRs and Mentions tabs |
 | `ctrl+b` | group the sessions by status or by project; in the Review queue, by project or by ticket |
-| `↑` `↓` · click · double-click | select a session · select it · open it |
+| `↑` `↓` · click · double-click | select a session (after typing, they carry on from the session you left) · select it · open it |
 | `home` `end` | jump to the first / last session (in the prompt they move the caret to the start / end of its row, then of the next / previous one) |
 | `enter` `→` | open the selected session |
 | type, then `enter` | start a new background session; it is selected, so `→` opens it |

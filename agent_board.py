@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.39.0"
+__version__ = "0.39.1"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1262,7 +1262,7 @@ HELP_COMMON_END = [
 # What the "?" overlay lists, per view: only keys that do something in the view you are looking at.
 HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
     "sessions": [
-        ("↑ / ↓", "select a session (stops at the first and last; esc returns to the prompt)"),
+        ("↑ / ↓", "select a session (after typing, from the one you left; esc returns to the prompt)"),
         ("home / end", "jump to the first / last session"),
         ("alt+↑ / alt+↓", "jump between groups"),
         ("alt+1 … alt+6", "open the Nth visible session"),
@@ -1389,6 +1389,7 @@ class Board:
         self.edit: Optional[dict] = None  # {'kind': find|rename|tags, 'text': str, 'sid': str}
         self.confirm: Optional[dict] = None  # {'kind': stop|remove, 'sid': str}
         self.sel: Optional[str] = None
+        self.left_sel: Optional[str] = None  # the session typing took the focus from: the arrows carry on from it
         self.scroll = 0
         self.msg = ""
         self.help = False
@@ -2542,11 +2543,19 @@ class Board:
             self.sel = None
             return
         ids = [s.id for s in flat]
+        left, self.left_sel = self.left_sel, None
+        if self.sel is None and left in ids:
+            self.sel = left  # typing moved the focus away from it; the arrow carries on from there, not from the top
         if self.sel not in ids:
             self.sel = ids[0] if delta > 0 else ids[-1]
             return
         i = ids.index(self.sel) + delta
         self.sel = ids[max(0, min(i, len(ids) - 1))]  # stops at either end; esc goes back to the prompt
+
+    def _focus_prompt(self) -> None:
+        """Typing, pasting or a click hands the focus to the prompt; the session it leaves is remembered for the arrows."""
+        if self.sel is not None:
+            self.left_sel, self.sel = self.sel, None
 
     def _enter_pr(self, pr) -> Effect:
         """Enter on a pull request: jump to a session already working on it, else open it in the browser."""
@@ -2750,7 +2759,7 @@ class Board:
         row = [b for b in hit[2] if b[0] == y - hit[0]] if hit else []
         if not row or self.mode in TAB_VIEWS:
             return
-        self.sel = None
+        self._focus_prompt()
         self.cursor = min(row, key=lambda b: abs(hit[1] + b[1] - x))[2]
 
     def prompt_text(self, text: Optional[str] = None) -> str:
@@ -2771,7 +2780,7 @@ class Board:
         text, self.dictated = self.dictated, ""
         if not text:
             return
-        self.sel = None  # the prompt takes the focus, as for any typing
+        self._focus_prompt()  # the prompt takes the focus, as for any typing
         before = self._input[: self.cursor]
         self._insert((" " if before and not before[-1].isspace() else "") + text)
         self.msg = f"✓ dictated {len(text.split())} words: check them, then enter"
@@ -2812,7 +2821,7 @@ class Board:
         elif self.mode in TAB_VIEWS:
             self.msg = "paste goes into the prompt: switch to the Sessions tab (alt+←)"
         elif text:
-            self.sel = None
+            self._focus_prompt()
             if len(text) > PASTE_CHIP_MIN_CHARS:
                 self._insert(self.add_paste(text))
             else:
@@ -2920,7 +2929,7 @@ class Board:
             return None
         if key == "esc":
             if s:
-                self.sel = None  # back to the prompt; a draft there is kept
+                self.sel = self.left_sel = None  # back to the prompt; a draft there is kept
             elif self.input:
                 self.reset_prompt()
             elif self.query:
@@ -2955,6 +2964,7 @@ class Board:
                 prompt = self.prompt_text(typed).strip()
                 cwd = mentioned[1] if mentioned else self.target()[1]
                 self.reset_prompt()
+                self.left_sel = None  # the task is sent: the arrows start from the top again
                 tags = [self.meta.add_tag(t) for t in suggest_tags(prompt, self.meta)]
                 return Effect("dispatch", prompt=prompt, cwd=cwd, tags=tags, model=self.model())
         elif key == "right" and s:
@@ -2985,20 +2995,20 @@ class Board:
         elif key == "ctrl+e":
             self.open_modelpicker()
         elif key == "ctrl+u":
-            self.sel = None
+            self._focus_prompt()
             self.reset_prompt()
         elif key == "ctrl+j":
-            self.sel = None
+            self._focus_prompt()
             self._insert("\n")
         elif key == "backspace":
-            self.sel = None
+            self._focus_prompt()
             before = [t for t in prompt_tokens(self._input) if t[1] <= self.cursor]
             if before:  # a pasted block goes in one backspace, as in Claude Code
                 self._delete_range(before[-1][0], self.cursor)
         elif key == "char" and ch == "?" and not self.input:
             self.help = True
         elif key in ("char", "space"):
-            self.sel = None
+            self._focus_prompt()
             self._insert(ch or " ")
         return None
 

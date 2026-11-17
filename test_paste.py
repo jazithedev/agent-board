@@ -281,6 +281,46 @@ class DraftAndSessions(unittest.TestCase):
         self.assertEqual([style for l in lines for t, style in l.segs if "half-written task" in t], ["bold"])
 
 
+class ArrowsAfterTyping(unittest.TestCase):
+    """Typing on a selected session moves the focus to the prompt; the arrows carry on from that session, not from the top."""
+
+    def setUp(self):
+        self.b = ab.Board(ab.Meta(Path(tempfile.mkdtemp()) / "m.json"), "/srv/www/scum-map", now=lambda: NOW)
+        self.b.set_sessions([ab.Session(id=f"id{i}", name=f"s{i}", state="done", project="scum-map", project_path="/srv/www/scum-map") for i in range(5)])
+        self.ids = [s.id for s in self.b.flat()]
+        self.b.sel = self.ids[2]
+
+    def test_space_then_backspace_and_down_moves_on_from_the_session(self):
+        self.b.handle("space", " ")
+        self.assertIsNone(self.b.sel)
+        self.b.handle("backspace")
+        self.b.handle("down")
+        self.assertEqual(self.b.sel, self.ids[3])
+
+    def test_up_after_typing_moves_back_from_the_session(self):
+        self.b.handle("char", "x")
+        self.b.handle("up")
+        self.assertEqual(self.b.sel, self.ids[1])
+        self.assertEqual(self.b.input, "x")  # the draft is kept
+
+    def test_esc_leaves_the_session_so_down_starts_from_the_top(self):
+        self.b.handle("esc")
+        self.b.handle("down")
+        self.assertEqual(self.b.sel, self.ids[0])
+
+    def test_starting_a_session_forgets_the_one_left(self):
+        self.b.handle("char", "x")
+        self.assertEqual(self.b.handle("enter").kind, "dispatch")
+        self.b.handle("down")
+        self.assertEqual(self.b.sel, self.ids[0])
+
+    def test_a_session_that_is_gone_falls_back_to_the_top(self):
+        self.b.handle("char", "x")
+        self.b.set_sessions([s for s in self.b.sessions if s.id != self.ids[2]])
+        self.b.handle("down")
+        self.assertEqual(self.b.sel, self.b.flat()[0].id)
+
+
 class CtrlC(unittest.TestCase):
     """ctrl+c never closes the board: esc is the way out."""
 
