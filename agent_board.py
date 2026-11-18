@@ -42,7 +42,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.39.1"
+__version__ = "0.39.2"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1309,7 +1309,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("enter / click", "jump to a session on that PR or its ticket (⟳), else open it in the browser"),
         ("o", "open the pull request in the browser"),
         ("f", "fix conflicts: a background session merges the base into the branch, resolves them and pushes"),
-        ("auto", "a PR with conflicts gets that session by itself on refresh, once per head commit; it is closed once its push clears them (Auto fix conflicts in ctrl+s)"),
+        ("auto", "a PR with conflicts (not a draft) gets that session by itself on refresh, once per head commit; it is closed once its push clears them (Auto fix conflicts in ctrl+s)"),
         ("m", "merge, choosing squash, merge commit or rebase; a PR behind its base is updated first and merged once its checks pass"),
         ("ctrl+g", "tag the pull request: Ready for QA or any tag of yours, picked or typed new"),
         ("ctrl+f", "filter pull requests"),
@@ -2091,11 +2091,11 @@ class Board:
         return self.meta.settings.get("auto_fix_conflicts", True) is not False
 
     def conflicts_to_fix(self) -> list:
-        """Your PRs with conflicts, at a head commit no fixing session was started for yet, with no session working on them."""
+        """Your non-draft PRs with conflicts, at a head commit no fixing session was started for yet, with no session working on them."""
         if not self.prs or not self.auto_fix_conflicts():
             return []
         done = self.meta.settings.get("conflicts_fixed") or {}
-        return [p for p in self.prs.mine if p.merge == "conflict" and p.head_sha and done.get(p.key) != p.head_sha
+        return [p for p in self.prs.mine if p.merge == "conflict" and not p.draft and p.head_sha and done.get(p.key) != p.head_sha
                 and not any(s.group == "working" for s in self.linked_sessions(p, by_ticket=False))]  # a ticket session may be busy elsewhere
 
     def remember_conflict_fix(self, pr) -> None:

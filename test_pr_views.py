@@ -857,8 +857,12 @@ class AutoFixConflicts(unittest.TestCase):
         return mine(n, merge="conflict", head_sha=sha, **kw)
 
     def test_picks_your_conflicted_prs_with_a_head_commit(self):
-        b = board("mine", mine=[self.conflicted(1), mine(2), self.conflicted(3, sha=""), self.conflicted(4, draft=True)])
-        self.assertEqual([p.number for p in b.conflicts_to_fix()], [1, 4])
+        b = board("mine", mine=[self.conflicted(1), mine(2), self.conflicted(3, sha="")])
+        self.assertEqual([p.number for p in b.conflicts_to_fix()], [1])
+
+    def test_skips_a_draft(self):
+        b = board("mine", mine=[self.conflicted(4, draft=True)])
+        self.assertEqual(b.conflicts_to_fix(), [])
 
     def test_skips_a_pr_a_session_is_already_working_on(self):
         b = board("mine", mine=[self.conflicted(5)])  # s1 works on PR #5
