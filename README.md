@@ -224,6 +224,8 @@ sudo apt install wl-clipboard   # Wayland
 
 `{audio}` stands for the recording's path; a command without it gets the path as its last argument. Any speech-to-text client fits, for example `whisper-cli -m ~/models/ggml-base.en.bin -nt -f {audio}` for whisper.cpp. The recording lives in a temporary folder and is deleted when the text is ready.
 
+Before it opens the microphone, `ctrl+n` checks that both commands are installed (and, for the default command, faster-whisper). If one is missing, nothing is recorded: the footer names what to install, for example `✗ speech to text needs faster-whisper (pip install faster-whisper): install it first, then press ctrl+n`.
+
 ## What it reads and writes
 
 It is a viewer plus a remote control, and it is careful about both:

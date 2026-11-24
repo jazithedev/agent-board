@@ -16,6 +16,7 @@ import copy
 import curses
 import fcntl
 import hashlib
+import importlib.util
 import json
 import locale
 import os
@@ -42,7 +43,7 @@ import atlassian as atl
 import pullrequests as prs
 import slash
 
-__version__ = "0.39.3"
+__version__ = "0.40.0"
 
 CLAUDE = os.environ.get("AGENT_BOARD_CLAUDE", "claude")
 JOBS_DIR = Path(os.environ.get("AGENT_BOARD_JOBS_DIR", Path.home() / ".claude" / "jobs"))
@@ -1277,7 +1278,7 @@ HELP_BY_VIEW: dict[str, list[tuple[str, str]]] = {
         ("← / → / click", "move the caret in the prompt; ctrl+← / ctrl+→ by word, home / end to the ends"),
         ("delete / ctrl+w", "delete the character after the caret / the word before it (alt+backspace too)"),
         ("ctrl+v / ctrl+j", "paste from the clipboard / new line; long pastes become [Pasted text] chips"),
-        ("ctrl+n", "dictate: start recording, press again to stop; the text lands at the caret (the recorder and speech-to-text command are in ctrl+s)"),
+        ("ctrl+n", "dictate: start recording, press again to stop; the text lands at the caret (the recorder and speech-to-text command are in ctrl+s; it says what to install when one is missing)"),
         ("ctrl+x / ctrl+y", "with a prompt typed and no session selected: cut / copy the prompt"),
         ("ctrl+p", "choose the project a new session starts in: every project you have used Claude Code in is listed; ctrl+t inside pins one"),
         ("ctrl+e", "choose the model new sessions use (alias or any model id)"),
@@ -5288,8 +5289,30 @@ def audio_command(template: str, audio: str) -> list[str]:
     return [p.replace("{audio}", audio) for p in parts]
 
 
-def start_dictation(board: Board, popen=subprocess.Popen) -> None:
+def dictation_missing(settings: dict, which=shutil.which, has_module=lambda name: importlib.util.find_spec(name) is not None) -> list[str]:
+    """What dictation needs and cannot find, each with how to get it; empty when it can run."""
+    missing = []
+    record = settings.get("dictate_record") or DEFAULT_DICTATE_RECORD
+    command = settings.get("dictate_command") or DEFAULT_DICTATE_COMMAND
+    for template, default, how, label in ((record, DEFAULT_DICTATE_RECORD, "sudo apt install alsa-utils", "Dictation recorder"),
+                                          (command, DEFAULT_DICTATE_COMMAND, "", "Dictation command")):
+        try:
+            program = shlex.split(template)[0]
+        except (ValueError, IndexError):  # a command that does not parse is reported when it runs
+            continue
+        if not which(program):
+            missing.append(f"{Path(program).name} ({how if template == default else f'or change {label} in ctrl+s'})")
+    if command == DEFAULT_DICTATE_COMMAND and not has_module("faster_whisper"):  # the bundled dictate.py runs in this Python
+        missing.append("faster-whisper (pip install faster-whisper)")
+    return missing
+
+
+def start_dictation(board: Board, popen=subprocess.Popen, missing: Optional[Callable[[dict], list[str]]] = None) -> None:
     """Opens the microphone through the recorder command (settings: Dictation recorder); the recording runs until stop_dictation."""
+    gaps = (missing or dictation_missing)(board.meta.settings)
+    if gaps:  # say what to install now, not after a recording that cannot be turned into text
+        board.msg = f"✗ speech to text needs {' and '.join(gaps)}: install {'them' if len(gaps) > 1 else 'it'} first, then press {DICTATE_KEY}"
+        return
     folder = tempfile.mkdtemp(prefix="agent-board-")
     audio = str(Path(folder) / "speech.wav")
     try:

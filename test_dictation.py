@@ -109,7 +109,7 @@ class Waveform(unittest.TestCase):
     def test_a_new_recording_starts_with_an_empty_meter(self):
         b = board()
         b.levels = [1.0] * 5
-        ab.start_dictation(b, popen=lambda args, **kw: FakeRecorder(args, **kw))
+        ab.start_dictation(b, popen=lambda args, **kw: FakeRecorder(args, **kw), missing=lambda s: [])
         self.assertEqual(b.levels, [])
         ab.abort_dictation(b)
 
@@ -137,6 +137,11 @@ class DictatedText(unittest.TestCase):
 
 
 class Recording(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(ab, "dictation_missing", return_value=[])  # the tests' machine need not have arecord
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_start_uses_the_recorder_setting_and_puts_the_file_last_without_a_placeholder(self):
         b = board()
         b.meta.set_setting("dictate_record", "my-recorder --rate 16000")
@@ -194,6 +199,33 @@ class Recording(unittest.TestCase):
         self.assertEqual(proc.signals, [ab.signal.SIGINT])
         self.assertFalse(Path(folder).exists())
         self.assertIsNone(b.dictation)
+
+
+class MissingTools(unittest.TestCase):
+    def test_nothing_missing_when_the_recorder_and_faster_whisper_are_there(self):
+        self.assertEqual(ab.dictation_missing({}, which=lambda p: "/usr/bin/" + p, has_module=lambda m: True), [])
+
+    def test_default_setup_names_arecord_and_faster_whisper_with_how_to_install(self):
+        gaps = ab.dictation_missing({}, which=lambda p: None if p == "arecord" else p, has_module=lambda m: False)
+        self.assertEqual(gaps, ["arecord (sudo apt install alsa-utils)", "faster-whisper (pip install faster-whisper)"])
+
+    def test_custom_commands_point_at_their_setting_and_skip_faster_whisper(self):
+        settings = {"dictate_record": "sox -d {audio}", "dictate_command": "/opt/bin/whisper-cli -f {audio}"}
+        gaps = ab.dictation_missing(settings, which=lambda p: None, has_module=lambda m: False)
+        self.assertEqual(gaps, ["sox (or change Dictation recorder in ctrl+s)", "whisper-cli (or change Dictation command in ctrl+s)"])
+
+    def test_start_does_not_open_the_microphone_and_says_what_to_install(self):
+        b = board()
+        made = []
+        ab.start_dictation(b, popen=lambda args, **kw: made.append(args), missing=lambda s: ["faster-whisper (pip install faster-whisper)"])
+        self.assertEqual(made, [])
+        self.assertIsNone(b.dictation)
+        self.assertEqual(b.msg, "✗ speech to text needs faster-whisper (pip install faster-whisper): install it first, then press ctrl+n")
+
+    def test_two_gaps_read_as_them(self):
+        b = board()
+        ab.start_dictation(b, popen=lambda args, **kw: None, missing=lambda s: ["a (x)", "b (y)"])
+        self.assertIn("needs a (x) and b (y): install them first", b.msg)
 
 
 class Transcribing(unittest.TestCase):
