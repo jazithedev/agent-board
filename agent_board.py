@@ -4652,10 +4652,8 @@ def read_key(scr) -> tuple[str, str]:
         if ch == " ":
             return "space", " "
         code = ord(ch)
-        if code in KEYS:
-            return KEYS[code], ""
-        if code < 32:
-            return "tick", ""
+        if code < 32 or code == 127:  # only control codes; letters such as ą (U+0105 = KEY_RIGHT) share codes with curses keys
+            return KEYS.get(code, "tick"), ""
         return "char", ch
     if ch == curses.KEY_RESIZE:
         curses.update_lines_cols()

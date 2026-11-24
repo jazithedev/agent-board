@@ -33,6 +33,11 @@ class ReadKey(unittest.TestCase):
         self.assertEqual(read("a"), ("char", "a"))
         self.assertEqual(read(" "), ("space", " "))
 
+    def test_letters_whose_code_matches_a_curses_key_are_still_letters(self):
+        # ą is U+0105 = KEY_RIGHT and ć is U+0107 = KEY_BACKSPACE; get_wch gives letters as str, keys as int
+        for letter in "ąćĄĆęłńóśźż":
+            self.assertEqual(read(letter), ("char", letter))
+
     def test_enter_alone_is_enter_and_ctrl_j_is_a_new_line(self):
         self.assertEqual(read("\r"), ("enter", ""))
         self.assertEqual(read("\n"), ("ctrl+j", ""))
